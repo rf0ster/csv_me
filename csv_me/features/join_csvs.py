@@ -12,7 +12,8 @@ from csv_me.menu import clear_screen, console, preview_df, show_menu, show_statu
 from csv_me.session import Session
 
 OPTIONS = [
-    "Add a CSV file to the join queue",
+    "Add a CSV file by path",
+    "Browse & select CSVs from directory",
     "View queued files & column summary",
     "Exclude columns from the result",
     "Execute join & save",
@@ -58,6 +59,61 @@ def _load_external_csv() -> tuple[pd.DataFrame, str] | None:
         f"({len(df)} rows, {len(df.columns)} columns)"
     )
     return df, path.name
+
+
+def _browse_and_select_csvs(session: Session) -> list[tuple[pd.DataFrame, str]]:
+    """List CSV files in the original file's directory and let user pick multiple.
+
+    Returns list of (DataFrame, filename) tuples for selected files.
+    """
+    source_dir = session.original_path.parent
+    csv_files = sorted(
+        [f for f in source_dir.iterdir() if f.suffix.lower() == ".csv" and f != session.original_path],
+        key=lambda f: f.name.lower(),
+    )
+
+    if not csv_files:
+        console.print(f"[yellow]No other CSV files found in {source_dir}[/yellow]")
+        console.input("[dim]Press Enter to continue...[/dim]")
+        return []
+
+    console.print()
+    console.print(f"[bold]CSV files in:[/bold] {source_dir}\n")
+    for i, f in enumerate(csv_files, 1):
+        console.print(f"  [bold]{i}.[/bold] {f.name}")
+    console.print(f"  [bold]0.[/bold] Cancel")
+    console.print()
+
+    raw = Prompt.ask(
+        "[bold green]Select files to add (comma-separated numbers, or 0 to cancel)[/bold green]"
+    )
+
+    if raw.strip() == "0":
+        return []
+
+    selected: list[tuple[pd.DataFrame, str]] = []
+    for p in raw.split(","):
+        try:
+            idx = int(p.strip())
+            if 1 <= idx <= len(csv_files):
+                path = csv_files[idx - 1]
+                try:
+                    df = pd.read_csv(path)
+                except Exception as e:
+                    console.print(f"[bold red]Error reading {path.name}:[/bold red] {e}")
+                    continue
+                if df.empty:
+                    console.print(f"[yellow]Skipping {path.name} (empty file).[/yellow]")
+                    continue
+                selected.append((df, path.name))
+                console.print(
+                    f"  [green]+[/green] {path.name}  "
+                    f"({len(df)} rows, {len(df.columns)} columns)"
+                )
+        except ValueError:
+            pass
+
+    return selected
 
 
 def _get_union_columns(
@@ -186,7 +242,7 @@ def run(session: Session) -> None:
             return
 
         if choice == 1:
-            # Add a CSV to the queue
+            # Add a CSV by path
             result = _load_external_csv()
             if result is not None:
                 queued.append(result)
@@ -197,6 +253,17 @@ def run(session: Session) -> None:
                 console.input("[dim]Press Enter to continue...[/dim]")
 
         elif choice == 2:
+            # Browse & select CSVs from directory
+            selected = _browse_and_select_csvs(session)
+            if selected:
+                queued.extend(selected)
+                console.print(
+                    f"\n[green]Added {len(selected)} file(s) to queue.[/green] "
+                    f"({len(queued)} total queued)"
+                )
+                console.input("[dim]Press Enter to continue...[/dim]")
+
+        elif choice == 3:
             # View queue summary
             if not queued:
                 console.print("[yellow]No files queued yet.[/yellow]")
@@ -206,7 +273,7 @@ def run(session: Session) -> None:
             _show_queue_summary(session.current_filename, current_df, queued)
             console.input("[dim]Press Enter to continue...[/dim]")
 
-        elif choice == 3:
+        elif choice == 4:
             # Exclude columns
             if not queued:
                 console.print("[yellow]No files queued yet.[/yellow]")
@@ -225,7 +292,7 @@ def run(session: Session) -> None:
                 console.print("[green]Keeping all columns.[/green]")
             console.input("[dim]Press Enter to continue...[/dim]")
 
-        elif choice == 4:
+        elif choice == 5:
             # Execute join
             if not queued:
                 console.print("[yellow]No files queued yet.[/yellow]")

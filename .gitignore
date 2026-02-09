@@ -1,0 +1,45 @@
+# Compiled Python modules
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+
+# Environments
+.venv
+venv
+env
+build/
+develop-eggs/
+dist/
+eggs/
+*.egg-info/
+.installed.cfg
+
+# Editor/IDE-specific files
+.vscode/        # Visual Studio Code
+.idea/          # PyCharm
+*.swp           # Vim swap files
+
+# OS-specific files
+.DS_Store       # macOS
+Thumbs.db       # Windows
+
+# Documentation
+docs/_build/
+
+# Python specific version files
+.python-version
+
+# Test and coverage artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Data and logs (optional, depending on project)
+*.log
+*.sqlite3
+data/
+logs/
+tmp/
+

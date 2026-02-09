@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "csv-me"
+version = "0.1.0"
+description = "A CLI tool for cleaning, transforming, splitting, merging, and analyzing CSV files"
+requires-python = ">=3.10"
+dependencies = [
+    "rich>=13.0",
+    "pandas>=2.0",
+]
+
+[project.scripts]
+csv-me = "csv_me.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["csv_me*"]

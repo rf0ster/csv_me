@@ -1,4 +1,0 @@
-Execute or make sure the functionality list here is in csv-me:
-- When the user selects to join multiple csvs, they also have the ability filter out unwanted columns. Remove this to keep the functionalityscoped, and the user can later remove the columns by another function in the menu.
-- When the user selects to join multiple csvs, the previews is displays to the command line. This is not ideal as it is way to much information and it should be removed.
-- For the search and replace functionality, allow the user to specify if the search term can be inside or part of another word, or if it should be a full match only. Should modify so that the user enters in one search term at a time with case sensitivity and full match options per search term, the replace value will still be the same for all search terms.

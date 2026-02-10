@@ -8,14 +8,13 @@ import pandas as pd
 from rich.prompt import Prompt
 from rich.table import Table
 
-from csv_me.menu import clear_screen, console, preview_df, show_menu, show_status
+from csv_me.menu import clear_screen, console, show_menu, show_status
 from csv_me.session import Session
 
 OPTIONS = [
     "Add a CSV file by path",
     "Browse & select CSVs from directory",
     "View queued files & column summary",
-    "Exclude columns from the result",
     "Execute join & save",
 ]
 
@@ -184,47 +183,8 @@ def _show_queue_summary(
     console.print()
 
 
-def _pick_columns_to_exclude(all_columns: list[str]) -> list[str]:
-    """Show all columns and let the user pick which to exclude.
-
-    Returns the list of columns to KEEP.
-    """
-    console.print()
-    console.print("[bold]All columns in the union:[/bold]")
-    console.print(
-        "Enter column numbers to [bold red]exclude[/bold red] from the result:"
-    )
-    for i, col in enumerate(all_columns, 1):
-        console.print(f"  [bold]{i}.[/bold] {col}")
-    console.print()
-
-    raw = Prompt.ask(
-        "[bold green]Columns to exclude (comma-separated, or press Enter to keep all)[/bold green]",
-        default="",
-    )
-
-    if not raw.strip():
-        return all_columns
-
-    exclude_indices: set[int] = set()
-    for p in raw.split(","):
-        try:
-            idx = int(p.strip())
-            if 1 <= idx <= len(all_columns):
-                exclude_indices.add(idx - 1)
-        except ValueError:
-            pass
-
-    selected = [col for i, col in enumerate(all_columns) if i not in exclude_indices]
-    if not selected:
-        console.print("[yellow]Cannot exclude all columns — keeping all.[/yellow]")
-        return all_columns
-    return selected
-
-
 def run(session: Session) -> None:
     queued: list[tuple[pd.DataFrame, str]] = []
-    excluded_cols: list[str] = []
 
     while True:
         clear_screen()
@@ -232,8 +192,7 @@ def run(session: Session) -> None:
 
         if queued:
             console.print(
-                f"[dim]Join queue: {len(queued)} file(s) queued  |  "
-                f"{len(excluded_cols)} column(s) excluded[/dim]\n"
+                f"[dim]Join queue: {len(queued)} file(s) queued[/dim]\n"
             )
 
         choice = show_menu("Join CSVs", OPTIONS)
@@ -282,25 +241,6 @@ def run(session: Session) -> None:
             console.input("[dim]Press Enter to continue...[/dim]")
 
         elif choice == 4:
-            # Exclude columns
-            if not queued:
-                console.print("[yellow]No files queued yet.[/yellow]")
-                console.input("[dim]Press Enter to continue...[/dim]")
-                continue
-            current_df = session.read_current()
-            all_cols = _get_union_columns(current_df, queued)
-            keep_cols = _pick_columns_to_exclude(all_cols)
-            excluded_cols = [c for c in all_cols if c not in keep_cols]
-            if excluded_cols:
-                console.print(
-                    f"[green]Excluding {len(excluded_cols)} column(s):[/green] "
-                    f"{', '.join(excluded_cols)}"
-                )
-            else:
-                console.print("[green]Keeping all columns.[/green]")
-            console.input("[dim]Press Enter to continue...[/dim]")
-
-        elif choice == 5:
             # Execute join
             if not queued:
                 console.print("[yellow]No files queued yet.[/yellow]")
@@ -313,20 +253,7 @@ def run(session: Session) -> None:
                 [current_df] + queued_dfs, ignore_index=True, sort=False
             )
 
-            if excluded_cols:
-                cols_to_drop = [c for c in excluded_cols if c in combined.columns]
-                combined = combined.drop(columns=cols_to_drop)
-
             combined = combined.fillna("")
-
-            if combined.empty or len(combined.columns) == 0:
-                console.print(
-                    "[bold red]Result has no columns — nothing to save.[/bold red]"
-                )
-                console.input("[dim]Press Enter to continue...[/dim]")
-                continue
-
-            preview_df(combined, title="Join Preview")
 
             confirm = Prompt.ask(
                 "[bold green]Save this result?[/bold green] (y/n)", default="y"
@@ -339,7 +266,6 @@ def run(session: Session) -> None:
             session.logger.log(
                 "Join CSVs",
                 f"Joined with: {file_names} | "
-                f"Excluded columns: {excluded_cols or 'none'} | "
                 f"Total rows: {len(combined)} | "
                 f"Total columns: {len(combined.columns)} | "
                 f"Saved: {out.name}",
@@ -353,5 +279,4 @@ def run(session: Session) -> None:
 
             # Reset queue
             queued.clear()
-            excluded_cols.clear()
             console.input("[dim]Press Enter to continue...[/dim]")

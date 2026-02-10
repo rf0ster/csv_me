@@ -6,7 +6,7 @@ import curses
 from typing import Any
 
 import pandas as pd
-from rich.prompt import Confirm
+from rich.prompt import Confirm, Prompt
 
 from csv_me.conditions import (
     build_expression,
@@ -67,7 +67,7 @@ def _row_editor(
     columns: list[str],
     values: dict[str, str],
     row_info: str,
-) -> tuple[dict[str, str], list[str], list[str]] | None:
+) -> tuple[dict[str, str], list[str], list[str]] | str | None:
     """Curses-based interactive row editor.
 
     Arrow keys navigate between fields, type to edit in-place,
@@ -101,7 +101,7 @@ def _row_editor(
             stdscr.addnstr(
                 2, 0,
                 "  [\u2191\u2193] Navigate  [\u2190\u2192] Cursor  "
-                "[Enter] Save  [Esc] Skip  [Ctrl+N] New column",
+                "[Enter] Save  [Esc] Skip  [Ctrl+N] New column  [Ctrl+D] Remove",
                 width - 1, curses.A_DIM,
             )
         except curses.error:
@@ -162,6 +162,8 @@ def _row_editor(
 
         if key == 27:  # Esc
             return None
+        elif key == 4:  # Ctrl+D — remove row
+            return "remove"
         elif key in (10, 13, curses.KEY_ENTER):
             return edited, new_cols, cols
         elif key == 14:  # Ctrl+N — add new column
@@ -221,10 +223,11 @@ def _edit_row_curses(
     columns: list[str],
     values: dict[str, str],
     row_info: str,
-) -> tuple[dict[str, str], list[str], list[str]] | None:
+) -> tuple[dict[str, str], list[str], list[str]] | str | None:
     """Launch the curses row editor.
 
-    Returns (edited_values, new_columns, ordered_columns) or None (skip).
+    Returns (edited_values, new_columns, ordered_columns), ``"remove"`` to
+    delete the row, or None (skip).
     """
     return curses.wrapper(_row_editor, columns, values, row_info)
 
@@ -270,9 +273,22 @@ def run(session: Session) -> None:
         if not Confirm.ask("[bold green]Proceed with search?[/bold green]"):
             continue
 
+        # Ask whether removed rows should be backed up
+        backup_filename: str | None = None
+        if Confirm.ask(
+            "[bold green]Back up removed rows to a separate file?[/bold green]",
+            default=False,
+        ):
+            name = Prompt.ask("[bold]Backup filename[/bold]", default="removed_rows.csv")
+            if not name.endswith(".csv"):
+                name += ".csv"
+            backup_filename = name
+
         # Iterate and edit matching rows
         edited_count = 0
         added_rows: list[dict[str, str]] = []
+        removed_rows: list[dict[str, str]] = []
+        removed_indices: list[int] = []
         total = len(df)
 
         for idx in list(df.index):
@@ -295,6 +311,17 @@ def run(session: Session) -> None:
             if result is None:
                 show_status(filename)
                 console.print(f"[dim]Skipped row {idx + 1}.[/dim]")
+                if not Confirm.ask(
+                    "[bold green]Continue to next match?[/bold green]"
+                ):
+                    break
+                continue
+
+            if result == "remove":
+                show_status(filename)
+                removed_rows.append(original.copy())
+                removed_indices.append(idx)
+                console.print(f"[red]Row {idx + 1} removed.[/red]")
                 if not Confirm.ask(
                     "[bold green]Continue to next match?[/bold green]"
                 ):
@@ -342,7 +369,17 @@ def run(session: Session) -> None:
             new_df = pd.DataFrame(added_rows, columns=columns)
             df = pd.concat([df, new_df], ignore_index=True)
 
-        if edited_count == 0 and not added_rows:
+        # Drop removed rows
+        if removed_indices:
+            df = df.drop(index=removed_indices).reset_index(drop=True)
+
+        # Write backup file for removed rows
+        if backup_filename and removed_rows:
+            pd.DataFrame(removed_rows).to_csv(
+                session.output_dir / backup_filename, index=False
+            )
+
+        if edited_count == 0 and not added_rows and not removed_indices:
             clear_screen()
             show_status(filename)
             console.print("[yellow]No rows edited.[/yellow]")
@@ -355,7 +392,8 @@ def run(session: Session) -> None:
         preview_df(df, title="Manual Edit Result")
         console.print(
             f"[dim]{edited_count} row(s) edited, "
-            f"{len(added_rows)} row(s) added.[/dim]\n"
+            f"{len(added_rows)} row(s) added, "
+            f"{len(removed_indices)} row(s) removed.[/dim]\n"
         )
 
         if not Confirm.ask("[bold green]Save changes?[/bold green]"):
@@ -364,7 +402,8 @@ def run(session: Session) -> None:
         out = session.save_step(df, "manual_edit")
         session.logger.log(
             "Manual Edit",
-            f"Edited {edited_count} row(s), added {len(added_rows)} row(s). "
+            f"Edited {edited_count} row(s), added {len(added_rows)} row(s), "
+            f"removed {len(removed_indices)} row(s). "
             f"Conditions: {format_expression(expr)} | "
             f"Saved: {out.name}",
         )

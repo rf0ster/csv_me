@@ -15,14 +15,16 @@ from csv_me.session import Session
 
 console = Console()
 
-# Feature registry: (menu label, handler function)
-# Each handler takes a Session and returns None.
-FEATURES: list[tuple[str, callable]] = []
+# Menu entry: either a direct action (label, handler) or a submenu
+# (label, [(sublabel, handler), ...]).
+MenuEntry = tuple[str, "callable | list[tuple[str, callable]]"]
+
+MENU: list[MenuEntry] = []
 
 
 def _register_features() -> None:
     """Lazily import and register feature modules."""
-    if FEATURES:
+    if MENU:
         return
     from csv_me.features.normalize_cols import run as normalize_cols
     from csv_me.features.normalize_phones import run as normalize_phones
@@ -34,23 +36,31 @@ def _register_features() -> None:
     from csv_me.features.split_join_rows import run as split_join_rows
     from csv_me.features.find_replace import run as find_replace
     from csv_me.features.remove_rows import run as remove_rows
+    from csv_me.features.sort import run as sort_rows
     from csv_me.features.jump_back import run as jump_back
     from csv_me.features.manual_edit import run as manual_edit
 
-    FEATURES.extend(
+    MENU.extend(
         [
-            ("Normalize Columns", normalize_cols),
-            ("Normalize Phone Numbers", normalize_phones),
-            ("Normalize Currency", normalize_currency),
-            ("Remove Duplicates", remove_duplicates),
-            ("Remove Columns", remove_columns),
-            ("Split Column", split_column),
-            ("Join CSVs", join_csvs),
-            ("Split-Join Rows", split_join_rows),
-            ("Find & Replace", find_replace),
-            ("Remove Rows", remove_rows),
-            ("Jump to Previous Step", jump_back),
-            ("Manual Edit", manual_edit),
+            ("Normalize", [
+                ("Columns", normalize_cols),
+                ("Phone", normalize_phones),
+                ("Currency", normalize_currency),
+            ]),
+            ("Remove", [
+                ("Rows", remove_rows),
+                ("Columns", remove_columns),
+                ("Duplicates", remove_duplicates),
+            ]),
+            ("Wrangle", [
+                ("Join CSVs", join_csvs),
+                ("Search and Replace", find_replace),
+                ("Sort", sort_rows),
+                ("Split Columns", split_column),
+                ("Split-Join", split_join_rows),
+            ]),
+            ("Revert", jump_back),
+            ("Edit", manual_edit),
         ]
     )
 
@@ -118,7 +128,7 @@ def main() -> None:
         clear_screen()
         show_status(session.current_filename)
 
-        labels = [label for label, _ in FEATURES]
+        labels = [label for label, _ in MENU]
         choice = show_menu("Main Menu", labels, back_label="Quit")
 
         if choice == 0:
@@ -132,5 +142,22 @@ def main() -> None:
             )
             break
 
-        _, handler = FEATURES[choice - 1]
-        handler(session)
+        label, entry = MENU[choice - 1]
+
+        if isinstance(entry, list):
+            # Submenu
+            while True:
+                clear_screen()
+                show_status(session.current_filename)
+
+                sub_labels = [sl for sl, _ in entry]
+                sub_choice = show_menu(label, sub_labels)
+
+                if sub_choice == 0:
+                    break
+
+                _, handler = entry[sub_choice - 1]
+                handler(session)
+        else:
+            # Direct action
+            entry(session)

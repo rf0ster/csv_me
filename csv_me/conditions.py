@@ -20,7 +20,7 @@ class Condition:
     """A single predicate evaluated against a row."""
 
     input_col: str
-    operator: str  # "not_empty" | "equals" | "not_equals" | "contains"
+    operator: str  # "not_empty" | "equals" | "not_equals" | "contains" | "word_count"
     value: str | None  # None for not_empty
 
 
@@ -57,6 +57,13 @@ OPERATORS: list[tuple[str, str]] = [
     ("equals", "Column equals value"),
     ("not_equals", "Column does not equal value"),
     ("contains", "Column contains value"),
+    ("word_count", "Word count comparison"),
+]
+
+WORD_COUNT_COMPARISONS: list[tuple[str, str]] = [
+    ("gt", "Greater than"),
+    ("lt", "Less than"),
+    ("eq", "Equal to"),
 ]
 
 
@@ -74,6 +81,13 @@ def format_condition(cond: Condition) -> str:
         return f'"{cond.input_col}" does not equal "{cond.value}"'
     if cond.operator == "contains":
         return f'"{cond.input_col}" contains "{cond.value}"'
+    if cond.operator == "word_count":
+        parts = (cond.value or "").split(":", 1)
+        if len(parts) == 2:
+            cmp_op, num = parts
+            sym = {"gt": ">", "lt": "<", "eq": "="}.get(cmp_op, cmp_op)
+            return f'"{cond.input_col}" word count {sym} {num}'
+        return f'"{cond.input_col}" word count {cond.value}'
     return f'"{cond.input_col}" {cond.operator} "{cond.value}"'
 
 
@@ -120,6 +134,22 @@ def _evaluate_single_condition(row: pd.Series, cond: Condition) -> bool:
         return val != (cond.value or "")
     if cond.operator == "contains":
         return (cond.value or "") in val
+    if cond.operator == "word_count":
+        count = len(val.split()) if val else 0
+        parts = (cond.value or "").split(":", 1)
+        if len(parts) != 2:
+            return False
+        cmp_op, num_str = parts
+        try:
+            num = int(num_str)
+        except ValueError:
+            return False
+        if cmp_op == "gt":
+            return count > num
+        if cmp_op == "lt":
+            return count < num
+        if cmp_op == "eq":
+            return count == num
     return False
 
 
@@ -152,6 +182,37 @@ def evaluate_expression(row: pd.Series, expr: Expression) -> bool:
 # ---------------------------------------------------------------------------
 # Building conditions (old flat API — preserved for backwards compat)
 # ---------------------------------------------------------------------------
+
+def _prompt_word_count_value() -> str | None:
+    """Prompt for word-count comparison type and number.
+
+    Returns a string like ``"gt:5"`` or None on invalid input.
+    """
+    console.print("[bold]Select comparison:[/bold]")
+    for i, (_, label) in enumerate(WORD_COUNT_COMPARISONS, 1):
+        console.print(f"  [bold]{i}.[/bold] {label}")
+    console.print()
+
+    raw = Prompt.ask("[bold green]Enter choice[/bold green]")
+    try:
+        cmp_idx = int(raw.strip())
+    except ValueError:
+        return None
+    if not (1 <= cmp_idx <= len(WORD_COUNT_COMPARISONS)):
+        console.print("[yellow]Invalid selection.[/yellow]")
+        return None
+
+    cmp_op = WORD_COUNT_COMPARISONS[cmp_idx - 1][0]
+
+    num_raw = Prompt.ask("[bold green]Enter word count number[/bold green]")
+    try:
+        num = int(num_raw.strip())
+    except ValueError:
+        console.print("[yellow]Invalid number.[/yellow]")
+        return None
+
+    return f"{cmp_op}:{num}"
+
 
 def _build_single_condition(
     columns: list[str],
@@ -199,7 +260,11 @@ def _build_single_condition(
 
     # Get comparison value if needed
     cond_value: str | None = None
-    if op != "not_empty":
+    if op == "word_count":
+        cond_value = _prompt_word_count_value()
+        if cond_value is None:
+            return None
+    elif op != "not_empty":
         cond_value = Prompt.ask(
             f"[bold green]Enter value to compare with '{in_col}'[/bold green]"
         )
@@ -274,7 +339,11 @@ def build_conditions(
 
         # Get comparison value if needed
         cond_value: str | None = None
-        if op != "not_empty":
+        if op == "word_count":
+            cond_value = _prompt_word_count_value()
+            if cond_value is None:
+                continue
+        elif op != "not_empty":
             cond_value = Prompt.ask(
                 f"[bold green]Enter value to compare with '{in_col}'[/bold green]"
             )

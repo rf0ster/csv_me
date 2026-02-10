@@ -1,0 +1,449 @@
+"""Squash: merge equivalent rows by identity columns with user-guided value selection."""
+
+from __future__ import annotations
+
+import curses
+from typing import Any
+
+import pandas as pd
+from rich.prompt import Confirm, Prompt
+
+from csv_me.menu import clear_screen, console, pick_columns, preview_df, show_menu, show_status
+from csv_me.session import Session
+
+
+def _best_effort_values(group: pd.DataFrame, all_columns: list[str], id_columns: list[str]) -> dict[str, str]:
+    """Build a best-effort squashed row using the most common value per column.
+
+    For identity columns the value is constant across the group.
+    For other columns the mode (most frequent non-null value) is used.
+    """
+    result: dict[str, str] = {}
+    for col in all_columns:
+        if col in id_columns:
+            result[col] = str(group[col].iloc[0])
+            continue
+        non_null = group[col].dropna()
+        if non_null.empty:
+            result[col] = ""
+            continue
+        mode = non_null.astype(str).mode()
+        result[col] = str(mode.iloc[0]) if not mode.empty else str(non_null.iloc[0])
+    return result
+
+
+def _squash_editor(
+    stdscr: Any,
+    columns: list[str],
+    values: dict[str, str],
+    group: pd.DataFrame,
+    header_info: str,
+) -> dict[str, str] | None:
+    """Curses-based squash editor.
+
+    Top section shows the original rows in compact text.
+    Bottom section shows the editable suggested squash row with
+    arrow-key navigation and inline editing (same UX as manual_edit).
+
+    Returns the edited values dict, or None to skip this group.
+    """
+    curses.curs_set(1)
+    curses.use_default_colors()
+    stdscr.keypad(True)
+
+    cols = list(columns)
+    edited = {col: str(v) for col, v in values.items()}
+    cursor_pos = {col: len(edited[col]) for col in cols}
+    current_field = 0
+    scroll_offset = 0
+    col_scroll = 0   # horizontal scroll index for original rows display
+    row_scroll = 0   # vertical scroll index for original rows display
+
+    max_col_len = max(len(c) for c in cols) if cols else 0
+
+    # Find max width per column (considering header name and all cell values)
+    col_widths: dict[str, int] = {}
+    for col in cols:
+        w = len(col)
+        for _, row in group.iterrows():
+            val = "" if pd.isna(row.get(col, "")) else str(row.get(col, ""))
+            w = max(w, len(val))
+        col_widths[col] = w
+
+    # Pre-extract row data for display (keep original CSV row numbers, 1-based)
+    row_data: list[tuple[int, dict[str, str]]] = []
+    for idx, row in group.iterrows():
+        row_data.append((idx + 1, {
+            col: "" if pd.isna(row.get(col, "")) else str(row.get(col, ""))
+            for col in cols
+        }))
+
+    SHIFT_UP = curses.KEY_SR
+    SHIFT_DOWN = curses.KEY_SF
+    SHIFT_LEFT = curses.KEY_SLEFT
+    SHIFT_RIGHT = curses.KEY_SRIGHT
+
+    while True:
+        height, width = stdscr.getmaxyx()
+        stdscr.erase()
+
+        y = 0
+
+        # Header
+        try:
+            stdscr.addnstr(y, 0, f"  {header_info}", width - 1, curses.A_BOLD)
+            y += 1
+            stdscr.addnstr(
+                y, 0,
+                "  [\u2191\u2193] Navigate  [\u2190\u2192] Cursor  "
+                "[Shift+\u2191\u2193] Scroll rows  [Shift+\u2190\u2192] Scroll columns  "
+                "[Enter] Save  [Esc] Skip",
+                width - 1, curses.A_DIM,
+            )
+            y += 2
+        except curses.error:
+            pass
+
+        # Original rows section — built dynamically from col_scroll
+        visible_cols = cols[col_scroll:]
+        scroll_hint = f" (col {col_scroll + 1}+)" if col_scroll > 0 else ""
+
+        try:
+            stdscr.addnstr(y, 0, f"  Original rows:{scroll_hint}", width - 1, curses.A_DIM)
+            y += 1
+        except curses.error:
+            pass
+
+        # Build header + row lines from visible columns
+        max_row_num = max(rn for rn, _ in row_data)
+        row_num_width = len(str(max_row_num))
+        row_prefix_len = len(f"    Row {'0' * row_num_width}:  ")
+        header_line = " " * row_prefix_len + " | ".join(
+            c.ljust(col_widths[c]) for c in visible_cols
+        )
+
+        # Build row lines from visible columns, apply row_scroll
+        visible_row_data = row_data[row_scroll:]
+
+        all_row_lines: list[str] = []
+        for row_num, rd in visible_row_data:
+            num_str = str(row_num).rjust(row_num_width)
+            vals = [rd[col].ljust(col_widths[col]) for col in visible_cols]
+            all_row_lines.append(f"    Row {num_str}:  " + " | ".join(vals))
+
+        # Reserve at least (len(cols) + 3) lines for the edit section
+        edit_section_min = len(cols) + 3
+        # Budget: 1 for header + as many rows as fit
+        orig_budget = max(height - y - edit_section_min - 1, 2)
+
+        # Always show column header
+        try:
+            stdscr.addnstr(y, 0, header_line, width - 1, curses.A_DIM)
+            y += 1
+        except curses.error:
+            pass
+        row_budget = orig_budget - 1  # subtract header line
+
+        for i, line in enumerate(all_row_lines):
+            if i >= row_budget:
+                remaining = len(all_row_lines) - i
+                try:
+                    stdscr.addnstr(y, 0, f"    ... ({remaining} more row{'s' if remaining != 1 else ''})", width - 1, curses.A_DIM)
+                    y += 1
+                except curses.error:
+                    pass
+                break
+            try:
+                stdscr.addnstr(y, 0, line, width - 1, curses.A_DIM)
+                y += 1
+            except curses.error:
+                pass
+
+        # Separator
+        y += 1
+        try:
+            stdscr.addnstr(y, 0, "  Suggested squash:", width - 1, curses.A_BOLD)
+            y += 1
+        except curses.error:
+            pass
+
+        # Editable fields
+        field_start_y = y
+        field_area = max(height - field_start_y - 1, 1)
+
+        if current_field < scroll_offset:
+            scroll_offset = current_field
+        elif current_field >= scroll_offset + field_area:
+            scroll_offset = current_field - field_area + 1
+
+        cursor_y, cursor_x = field_start_y, 0
+        visible_end = min(len(cols), scroll_offset + field_area)
+
+        for i in range(scroll_offset, visible_end):
+            fy = field_start_y + (i - scroll_offset)
+            col = cols[i]
+            val = edited[col]
+            padded = col.rjust(max_col_len)
+
+            try:
+                if i == current_field:
+                    prefix = " \u25b8 "
+                    label = f"{padded}:  "
+                    val_x = len(prefix) + len(label)
+                    max_val = max(width - val_x - 1, 0)
+                    display_val = val[:max_val]
+
+                    stdscr.addnstr(fy, 0, prefix, width - 1, curses.A_BOLD)
+                    stdscr.addnstr(
+                        fy, len(prefix), label,
+                        max(width - 1 - len(prefix), 0), curses.A_BOLD,
+                    )
+                    if display_val:
+                        stdscr.addnstr(fy, val_x, display_val, max_val)
+
+                    cursor_y = fy
+                    cursor_x = val_x + min(cursor_pos[col], max_val)
+                else:
+                    line = f"   {padded}:  {val}"
+                    stdscr.addnstr(fy, 0, line, width - 1)
+            except curses.error:
+                pass
+
+        try:
+            stdscr.move(cursor_y, cursor_x)
+        except curses.error:
+            pass
+
+        stdscr.refresh()
+
+        key = stdscr.getch()
+        col = cols[current_field]
+
+        if key == 27:  # Esc — skip
+            return None
+        elif key in (10, 13, curses.KEY_ENTER):
+            return edited
+        elif key == SHIFT_LEFT:
+            if col_scroll > 0:
+                col_scroll -= 1
+        elif key == SHIFT_RIGHT:
+            if col_scroll < len(cols) - 1:
+                col_scroll += 1
+        elif key == SHIFT_UP:
+            if row_scroll > 0:
+                row_scroll -= 1
+        elif key == SHIFT_DOWN:
+            if row_scroll < len(row_data) - 1:
+                row_scroll += 1
+        elif key == curses.KEY_UP:
+            if current_field > 0:
+                current_field -= 1
+        elif key == curses.KEY_DOWN:
+            if current_field < len(cols) - 1:
+                current_field += 1
+        elif key == curses.KEY_LEFT:
+            if cursor_pos[col] > 0:
+                cursor_pos[col] -= 1
+        elif key == curses.KEY_RIGHT:
+            if cursor_pos[col] < len(edited[col]):
+                cursor_pos[col] += 1
+        elif key in (curses.KEY_BACKSPACE, 127, 8):
+            pos = cursor_pos[col]
+            if pos > 0:
+                edited[col] = edited[col][: pos - 1] + edited[col][pos:]
+                cursor_pos[col] = pos - 1
+        elif key == curses.KEY_DC:  # Delete
+            pos = cursor_pos[col]
+            if pos < len(edited[col]):
+                edited[col] = edited[col][:pos] + edited[col][pos + 1 :]
+        elif key == curses.KEY_HOME:
+            cursor_pos[col] = 0
+        elif key == curses.KEY_END:
+            cursor_pos[col] = len(edited[col])
+        elif 32 <= key <= 126:  # Printable ASCII
+            pos = cursor_pos[col]
+            edited[col] = edited[col][:pos] + chr(key) + edited[col][pos:]
+            cursor_pos[col] = pos + 1
+
+
+def _edit_squash_curses(
+    columns: list[str],
+    values: dict[str, str],
+    group: pd.DataFrame,
+    header_info: str,
+) -> dict[str, str] | None:
+    """Launch the curses squash editor.
+
+    Returns edited values dict, or None to skip.
+    """
+    return curses.wrapper(_squash_editor, columns, values, group, header_info)
+
+
+def run(session: Session) -> None:
+    while True:
+        clear_screen()
+        show_status(session.current_filename)
+
+        choice = show_menu("Squash", ["Squash equivalent rows"])
+        if choice == 0:
+            return
+
+        df = session.read_current()
+        columns = list(df.columns)
+        filename = session.current_filename
+
+        # --- Ask about separate file for squashed rows ---
+        clear_screen()
+        show_status(filename)
+        squash_file: str | None = None
+        if Confirm.ask(
+            "[bold green]Output squashed (original) rows to a separate file for review?[/bold green]",
+            default=True,
+        ):
+            name = Prompt.ask(
+                "[bold]Filename for squashed rows[/bold]",
+                default="squashed_rows.csv",
+            )
+            if not name.endswith(".csv"):
+                name += ".csv"
+            squash_file = name
+
+        # --- Pick identity columns ---
+        clear_screen()
+        show_status(filename)
+        console.print(
+            "[bold]Select the columns that uniquely identify rows.[/bold]\n"
+            "[dim]Rows with identical values in these columns will be squashed together.[/dim]\n"
+        )
+        id_columns = pick_columns(df, prompt_text="Identity columns")
+        if not id_columns:
+            console.print("[yellow]No columns selected.[/yellow]")
+            console.input("[dim]Press Enter to continue...[/dim]")
+            continue
+
+        console.print(f"\n[dim]Identity columns: {', '.join(id_columns)}[/dim]\n")
+
+        # --- Find groups with duplicates ---
+        grouped = df.groupby(id_columns, sort=False)
+        dup_groups = [(key, grp) for key, grp in grouped if len(grp) > 1]
+
+        if not dup_groups:
+            console.print("[yellow]No duplicate groups found for the selected columns.[/yellow]")
+            console.input("[dim]Press Enter to continue...[/dim]")
+            continue
+
+        console.print(
+            f"[bold]Found {len(dup_groups)} group(s) with duplicate rows.[/bold]\n"
+        )
+        if not Confirm.ask("[bold green]Proceed with squash?[/bold green]"):
+            continue
+
+        # --- Process each group ---
+        squashed_count = 0
+        squashed_original_rows: list[pd.DataFrame] = []
+        result_rows: list[dict[str, str]] = []
+        skipped_groups: list[pd.DataFrame] = []
+
+        # Collect non-duplicate rows (pass through unchanged)
+        non_dup_indices = set()
+        for _, grp in grouped:
+            if len(grp) == 1:
+                non_dup_indices.update(grp.index.tolist())
+
+        for group_num, (key, group) in enumerate(dup_groups, 1):
+            # Build identity description
+            if isinstance(key, tuple):
+                id_desc = ", ".join(f"{c}={k}" for c, k in zip(id_columns, key))
+            else:
+                id_desc = f"{id_columns[0]}={key}"
+
+            header = (
+                f"Squash \u2014 Group {group_num} of {len(dup_groups)}  "
+                f"({id_desc})  [{len(group)} rows]"
+            )
+
+            best = _best_effort_values(group, columns, id_columns)
+            result = _edit_squash_curses(columns, best, group, header)
+            clear_screen()
+
+            if result is None:
+                # Skipped
+                skipped_groups.append(group)
+                show_status(filename)
+                console.print("[dim]Group skipped \u2014 original rows kept.[/dim]")
+                console.input("[dim]Press Enter to continue...[/dim]")
+                continue
+
+            # Got edited values back
+            result_rows.append(result)
+            squashed_count += 1
+            squashed_original_rows.append(group)
+
+            # Write squashed original rows to file incrementally
+            if squash_file:
+                squash_path = session.output_dir / squash_file
+                write_header = not squash_path.exists()
+                group.to_csv(squash_path, mode="a", index=False, header=write_header)
+
+            show_status(filename)
+            console.print(
+                f"[green]Group squashed![/green] "
+                f"({len(group)} rows \u2192 1)\n"
+            )
+            console.input("[dim]Press Enter to continue...[/dim]")
+
+        if squashed_count == 0 and not skipped_groups:
+            console.print("[yellow]No groups were squashed.[/yellow]")
+            console.input("[dim]Press Enter to continue...[/dim]")
+            continue
+
+        # --- Build final DataFrame ---
+        non_dup_df = df.loc[sorted(non_dup_indices)] if non_dup_indices else pd.DataFrame(columns=columns)
+
+        parts = [non_dup_df]
+        for grp in skipped_groups:
+            parts.append(grp)
+        if result_rows:
+            squashed_df = pd.DataFrame(result_rows, columns=columns)
+            parts.append(squashed_df)
+
+        final_df = pd.concat(parts, ignore_index=True)
+
+        # --- Preview and save ---
+        clear_screen()
+        show_status(filename)
+        preview_df(final_df, title="Squash Result")
+
+        total_original = sum(len(grp) for grp in squashed_original_rows)
+        console.print(
+            f"[dim]{squashed_count} group(s) squashed "
+            f"({total_original} rows \u2192 {squashed_count}). "
+            f"{len(skipped_groups)} group(s) skipped.[/dim]\n"
+        )
+
+        if not Confirm.ask("[bold green]Save changes?[/bold green]"):
+            if squash_file:
+                squash_path = session.output_dir / squash_file
+                if squash_path.exists():
+                    squash_path.unlink()
+            continue
+
+        out = session.save_step(final_df, "squash")
+        session.logger.log(
+            "Squash",
+            f"Identity columns: {id_columns} | "
+            f"Groups squashed: {squashed_count} | "
+            f"Rows before: {len(df)} | Rows after: {len(final_df)} | "
+            f"Saved: {out.name}"
+            + (f" | Squashed rows file: {squash_file}" if squash_file else ""),
+        )
+
+        console.print(
+            f"\n[green]Done![/green] Saved as [bold]{out.name}[/bold]\n"
+        )
+        if squash_file:
+            console.print(
+                f"[dim]Original squashed rows saved to: {squash_file}[/dim]\n"
+            )
+        console.input("[dim]Press Enter to continue...[/dim]")
+        return

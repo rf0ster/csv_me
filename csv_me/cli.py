@@ -37,6 +37,7 @@ def _register_features() -> None:
     from csv_me.features.find_replace import run as find_replace
     from csv_me.features.remove_rows import run as remove_rows
     from csv_me.features.sort import run as sort_rows
+    from csv_me.features.squash import run as squash
     from csv_me.features.jump_back import run as jump_back
     from csv_me.features.manual_edit import run as manual_edit
 
@@ -58,6 +59,7 @@ def _register_features() -> None:
                 ("Sort", sort_rows),
                 ("Split Columns", split_column),
                 ("Split-Join", split_join_rows),
+                ("Squash", squash),
             ]),
             ("Revert", jump_back),
             ("Edit", manual_edit),

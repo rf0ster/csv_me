@@ -74,8 +74,9 @@ def main() -> None:
         if Session.is_csv_me_output_dir(path):
             session = Session.from_output_dir(path)
             console.print(
-                f"[green]Resumed session:[/green] step {session.step}  "
-                f"— [bold]{session.current_filename}[/bold]\n"
+                f"[green]Resumed session:[/green] [bold]{session.name}[/bold]  "
+                f"— step {session.step}  "
+                f"— {session.current_filename}\n"
                 f"  ([dim]{session.output_dir}[/dim])\n"
             )
         elif Path(path).resolve().is_dir():
@@ -87,10 +88,15 @@ def main() -> None:
             )
             sys.exit(1)
         else:
-            session = Session(path)
+            session_name = Prompt.ask(
+                "[bold green]Enter a name for this session[/bold green]",
+                default=Path(path).stem,
+            )
+            session = Session(path, name=session_name)
             console.print(
                 f"[green]Loaded:[/green] {session.original_path.name}  "
-                f"([dim]{session.output_dir}[/dim])\n"
+                f"— session [bold]{session.name}[/bold]\n"
+                f"  ([dim]{session.output_dir}[/dim])\n"
             )
     except json.JSONDecodeError:
         console.print(

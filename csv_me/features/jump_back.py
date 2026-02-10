@@ -13,7 +13,7 @@ def run(session: Session) -> None:
         clear_screen()
         show_status(session.current_filename)
 
-        if session.step < 1:
+        if session.step < 2:
             console.print("[yellow]Nothing to jump back to — only the original file exists.[/yellow]\n")
             console.input("[dim]Press Enter to continue...[/dim]")
             return
@@ -21,7 +21,7 @@ def run(session: Session) -> None:
         # Build menu options from history, excluding the current step
         options: list[str] = []
         for i, path in enumerate(session.history[:-1]):
-            options.append(f"Step {i}: {path.name}")
+            options.append(path.name)
 
         choice = show_menu("Jump to Previous Step", options)
 
@@ -30,7 +30,7 @@ def run(session: Session) -> None:
 
         target_index = choice - 1
         target_path = session.history[target_index]
-        steps_to_remove = session.step - target_index
+        steps_to_remove = session.step - target_index - 1
 
         console.print(
             f"\n[bold yellow]This will delete {steps_to_remove} step file(s) "
@@ -46,12 +46,12 @@ def run(session: Session) -> None:
         result = session.jump_to_step(target_index)
         session.logger.log(
             "Jump to Previous Step",
-            f"Reverted to step {target_index} ({result.name}) | "
+            f"Reverted to step {target_index + 1} ({result.name}) | "
             f"Deleted {steps_to_remove} later step(s)",
         )
 
         console.print(
-            f"\n[green]Done![/green] Jumped back to step {target_index}: "
+            f"\n[green]Done![/green] Jumped back to step {target_index + 1}: "
             f"[bold]{result.name}[/bold]\n"
         )
         console.input("[dim]Press Enter to continue...[/dim]")

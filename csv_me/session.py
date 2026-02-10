@@ -19,30 +19,31 @@ class Session:
 
     MANIFEST_NAME = ".csv_me_session.json"
 
-    def __init__(self, input_path: str) -> None:
+    def __init__(self, input_path: str, name: str = "") -> None:
         self.original_path = Path(input_path).resolve()
         if not self.original_path.exists():
             raise FileNotFoundError(f"File not found: {self.original_path}")
         if self.original_path.suffix.lower() != ".csv":
             raise ValueError(f"Not a CSV file: {self.original_path}")
 
+        self.name = name.strip() or self.original_path.stem
         self.output_dir = self._create_output_dir()
         self.logger = TransformationLogger(self.output_dir)
-        self.step = 0
+        self.step = 1
         self.history: list[Path] = []
 
-        # Copy original into the output folder as step 0
-        initial_copy = self.output_dir / f"00_original_{self.original_path.name}"
+        # Copy original into the output folder as step 1
+        initial_copy = self.output_dir / f"01_original_{self.original_path.name}"
         shutil.copy2(self.original_path, initial_copy)
         self.current_file = initial_copy
         self.history.append(initial_copy)
-        self.logger.log("Session started", f"Loaded {self.original_path.name}")
+        self.logger.log("Session started", f"Session '{self.name}' — Loaded {self.original_path.name}")
         self._write_manifest()
 
     def _create_output_dir(self) -> Path:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        stem = self.original_path.stem
-        output_dir = self.original_path.parent / f"{stem}_csv_me_{timestamp}"
+        safe_name = self.name.replace(" ", "_").lower()
+        output_dir = self.original_path.parent / f"{safe_name}_csv_me_{timestamp}"
         output_dir.mkdir(parents=True, exist_ok=True)
         return output_dir
 
@@ -78,6 +79,7 @@ class Session:
         """Write session state to a JSON manifest in the output directory."""
         manifest = {
             "csv_me_version": __version__,
+            "session_name": self.name,
             "original_path": str(self.original_path),
             "original_filename": self.original_path.name,
             "created_at": self.history[0].stat().st_mtime
@@ -104,7 +106,7 @@ class Session:
         """
         if target_index < 0 or target_index >= len(self.history):
             raise ValueError(f"Invalid step index: {target_index}")
-        if target_index >= self.step:
+        if target_index >= self.step - 1:
             raise ValueError(
                 f"Target step {target_index} is not before current step {self.step}"
             )
@@ -117,7 +119,7 @@ class Session:
         # Truncate history and reset state
         self.history = self.history[: target_index + 1]
         self.current_file = self.history[target_index]
-        self.step = target_index
+        self.step = target_index + 1
         self._write_manifest()
         return self.current_file
 
@@ -153,6 +155,7 @@ class Session:
             )
 
         session = cls.__new__(cls)
+        session.name = manifest.get("session_name", "")
         session.original_path = Path(manifest["original_path"])
         session.output_dir = output_dir
         session.step = manifest["step"]
@@ -161,6 +164,6 @@ class Session:
         session.logger = TransformationLogger(output_dir, append=True)
         session.logger.log(
             "Session resumed",
-            f"Resumed at step {session.step} — {session.current_file.name}",
+            f"Session '{session.name}' — Resumed at step {session.step} — {session.current_file.name}",
         )
         return session

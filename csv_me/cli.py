@@ -35,6 +35,7 @@ def _register_features() -> None:
     from csv_me.features.find_replace import run as find_replace
     from csv_me.features.remove_rows import run as remove_rows
     from csv_me.features.jump_back import run as jump_back
+    from csv_me.features.manual_edit import run as manual_edit
 
     FEATURES.extend(
         [
@@ -49,6 +50,7 @@ def _register_features() -> None:
             ("Find & Replace", find_replace),
             ("Remove Rows", remove_rows),
             ("Jump to Previous Step", jump_back),
+            ("Manual Edit", manual_edit),
         ]
     )
 

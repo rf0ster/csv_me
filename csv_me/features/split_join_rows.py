@@ -2,61 +2,17 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import pandas as pd
 from rich.prompt import Confirm, Prompt
 
+from csv_me.conditions import (
+    Condition,
+    build_conditions,
+    evaluate_conditions,
+    format_condition,
+)
 from csv_me.menu import clear_screen, console, preview_df, show_menu, show_status
 from csv_me.session import Session
-
-
-@dataclass
-class Condition:
-    """A single predicate evaluated against an input row."""
-
-    input_col: str
-    operator: str  # "not_empty" | "equals" | "not_equals" | "contains"
-    value: str | None  # None for not_empty
-
-
-def _format_condition(cond: Condition) -> str:
-    """Return a human-readable description of a condition."""
-    if cond.operator == "not_empty":
-        return f'"{cond.input_col}" is not empty'
-    if cond.operator == "equals":
-        return f'"{cond.input_col}" equals "{cond.value}"'
-    if cond.operator == "not_equals":
-        return f'"{cond.input_col}" does not equal "{cond.value}"'
-    if cond.operator == "contains":
-        return f'"{cond.input_col}" contains "{cond.value}"'
-    return f'"{cond.input_col}" {cond.operator} "{cond.value}"'
-
-
-def _evaluate_conditions(
-    input_row: pd.Series, conditions: list[Condition]
-) -> bool:
-    """Evaluate all conditions against an input row (AND logic).
-
-    Returns True if all conditions pass or if the list is empty.
-    """
-    for cond in conditions:
-        raw = input_row.get(cond.input_col, "")
-        val = "" if pd.isna(raw) else str(raw).strip()
-
-        if cond.operator == "not_empty":
-            if val == "":
-                return False
-        elif cond.operator == "equals":
-            if val != (cond.value or ""):
-                return False
-        elif cond.operator == "not_equals":
-            if val == (cond.value or ""):
-                return False
-        elif cond.operator == "contains":
-            if (cond.value or "") not in val:
-                return False
-    return True
 
 
 def _define_conditions(
@@ -72,8 +28,6 @@ def _define_conditions(
 
     Returns a list of Condition objects (may be empty).
     """
-    conditions: list[Condition] = []
-
     _refresh(filename)
     _show_mapping_progress(
         output_headers, common_mappings, row_mappings, row_conditions
@@ -82,78 +36,15 @@ def _define_conditions(
     if not Confirm.ask(
         f"[bold green]Add conditions for Output Row {row_num}?[/bold green]"
     ):
-        return conditions
+        return []
 
-    condition_types = [
-        ("not_empty", "Column is not empty"),
-        ("equals", "Column equals value"),
-        ("not_equals", "Column does not equal value"),
-        ("contains", "Column contains value"),
-    ]
-
-    while True:
+    def header_fn() -> None:
         _refresh(filename)
         _show_mapping_progress(
             output_headers, common_mappings, row_mappings, row_conditions
         )
 
-        if conditions:
-            console.print(f"  [bold]Output Row {row_num} conditions so far:[/bold]")
-            for c in conditions:
-                console.print(f"    [cyan]IF[/cyan] {_format_condition(c)}")
-            console.print()
-
-        # Pick condition type
-        console.print("[bold]Select condition type:[/bold]")
-        for i, (_, label) in enumerate(condition_types, 1):
-            console.print(f"  [bold]{i}.[/bold] {label}")
-        console.print(f"  [bold]0.[/bold] Done adding conditions")
-        console.print()
-
-        raw = Prompt.ask("[bold green]Enter choice[/bold green]")
-        try:
-            idx = int(raw.strip())
-        except ValueError:
-            continue
-        if idx == 0:
-            break
-        if not (1 <= idx <= len(condition_types)):
-            console.print("[yellow]Invalid selection.[/yellow]")
-            continue
-
-        op = condition_types[idx - 1][0]
-
-        # Pick input column
-        _refresh(filename)
-        console.print("[bold]Select input column for condition:[/bold]")
-        for i, col in enumerate(input_columns, 1):
-            console.print(f"  [bold]{i}.[/bold] {col}")
-        console.print()
-
-        col_raw = Prompt.ask("[bold green]Enter column number[/bold green]")
-        try:
-            col_idx = int(col_raw.strip())
-        except ValueError:
-            continue
-        if not (1 <= col_idx <= len(input_columns)):
-            console.print("[yellow]Invalid selection.[/yellow]")
-            continue
-
-        in_col = input_columns[col_idx - 1]
-
-        # Get comparison value if needed
-        cond_value: str | None = None
-        if op != "not_empty":
-            cond_value = Prompt.ask(
-                f"[bold green]Enter value to compare with '{in_col}'[/bold green]"
-            )
-
-        conditions.append(Condition(input_col=in_col, operator=op, value=cond_value))
-        console.print(
-            f"[green]Added:[/green] {_format_condition(conditions[-1])}"
-        )
-
-    return conditions
+    return build_conditions(input_columns, header_fn=header_fn)
 
 
 def _refresh(filename: str) -> None:
@@ -195,7 +86,7 @@ def _show_mapping_progress(
             if row_conditions and i <= len(row_conditions) and row_conditions[i - 1]:
                 console.print(f"    [bold]Conditions (ALL must match):[/bold]")
                 for cond in row_conditions[i - 1]:
-                    console.print(f"      [cyan]IF[/cyan] {_format_condition(cond)}")
+                    console.print(f"      [cyan]IF[/cyan] {format_condition(cond)}")
     console.print()
 
 
@@ -409,7 +300,7 @@ def run(session: Session) -> None:
         output_rows: list[dict[str, str]] = []
         for _, input_row in df.iterrows():
             for idx, mapping in enumerate(row_mappings):
-                if not _evaluate_conditions(input_row, row_conditions[idx]):
+                if not evaluate_conditions(input_row, row_conditions[idx]):
                     continue
                 new_row: dict[str, str] = {}
                 for out_col in output_headers:
@@ -428,7 +319,7 @@ def run(session: Session) -> None:
 
         out = session.save_step(result_df, "split_join")
         condition_summary = {
-            i + 1: [_format_condition(c) for c in conds]
+            i + 1: [format_condition(c) for c in conds]
             for i, conds in enumerate(row_conditions)
             if conds
         }

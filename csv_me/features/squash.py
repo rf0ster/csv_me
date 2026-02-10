@@ -86,14 +86,15 @@ def _squash_editor(
     values: dict[str, str],
     group: pd.DataFrame,
     header_info: str,
-) -> tuple[dict[str, str], list[str], list[str]] | None:
+) -> tuple[dict[str, str], list[str], list[str]] | str | None:
     """Curses-based squash editor.
 
     Top section shows the original rows in compact text.
     Bottom section shows the editable suggested squash row with
     arrow-key navigation and inline editing (same UX as manual_edit).
 
-    Returns (edited_values, new_columns, ordered_columns) or None to skip.
+    Returns (edited_values, new_columns, ordered_columns), ``"remove"``
+    to remove the entire group, or None to skip.
     """
     curses.curs_set(1)
     curses.use_default_colors()
@@ -146,7 +147,7 @@ def _squash_editor(
                 y, 0,
                 "  [\u2191\u2193] Navigate  [\u2190\u2192] Cursor  "
                 "[Shift+\u2191\u2193] Scroll rows  [Shift+\u2190\u2192] Scroll columns  "
-                "[Ctrl+N] New column  [Enter] Save  [Esc] Skip",
+                "[Ctrl+N] New column  [Ctrl+D] Remove  [Enter] Save  [Esc] Skip",
                 width - 1, curses.A_DIM,
             )
             y += 2
@@ -270,6 +271,8 @@ def _squash_editor(
 
         if key == 27:  # Esc — skip
             return None
+        elif key == 4:  # Ctrl+D — remove group
+            return "remove"
         elif key in (10, 13, curses.KEY_ENTER):
             return edited, new_cols, cols
         elif key == 14:  # Ctrl+N — add new column
@@ -343,10 +346,10 @@ def _edit_squash_curses(
     values: dict[str, str],
     group: pd.DataFrame,
     header_info: str,
-) -> tuple[dict[str, str], list[str], list[str]] | None:
+) -> tuple[dict[str, str], list[str], list[str]] | str | None:
     """Launch the curses squash editor.
 
-    Returns (edited_values, new_columns, ordered_columns) or None to skip.
+    Returns (edited_values, new_columns, ordered_columns), ``"remove"``, or None to skip.
     """
     return curses.wrapper(_squash_editor, columns, values, group, header_info)
 
@@ -380,6 +383,20 @@ def run(session: Session) -> None:
                 name += ".csv"
             squash_file = name
 
+        # --- Ask about separate file for removed rows ---
+        remove_file: str | None = None
+        if Confirm.ask(
+            "[bold green]Output removed groups to a separate file?[/bold green]",
+            default=True,
+        ):
+            name = Prompt.ask(
+                "[bold]Filename for removed rows[/bold]",
+                default="removed_rows.csv",
+            )
+            if not name.endswith(".csv"):
+                name += ".csv"
+            remove_file = name
+
         # --- Pick identity columns ---
         clear_screen()
         show_status(filename)
@@ -412,7 +429,9 @@ def run(session: Session) -> None:
 
         # --- Process each group ---
         squashed_count = 0
+        removed_count = 0
         squashed_original_rows: list[pd.DataFrame] = []
+        removed_original_rows: list[pd.DataFrame] = []
         result_rows: list[dict[str, str]] = []
         skipped_groups: list[pd.DataFrame] = []
 
@@ -446,6 +465,22 @@ def run(session: Session) -> None:
                 console.input("[dim]Press Enter to continue...[/dim]")
                 continue
 
+            if result == "remove":
+                removed_count += 1
+                removed_original_rows.append(group)
+                # Write removed rows to file incrementally
+                if remove_file:
+                    remove_path = session.output_dir / remove_file
+                    write_header = not remove_path.exists()
+                    group.to_csv(remove_path, mode="a", index=False, header=write_header)
+                show_status(filename)
+                console.print(
+                    f"[red]Group removed![/red] "
+                    f"({len(group)} rows removed)\n"
+                )
+                console.input("[dim]Press Enter to continue...[/dim]")
+                continue
+
             edited_values, new_cols, ordered_cols = result
 
             # Register any new columns and update column ordering
@@ -472,8 +507,8 @@ def run(session: Session) -> None:
             )
             console.input("[dim]Press Enter to continue...[/dim]")
 
-        if squashed_count == 0 and not skipped_groups:
-            console.print("[yellow]No groups were squashed.[/yellow]")
+        if squashed_count == 0 and removed_count == 0 and not skipped_groups:
+            console.print("[yellow]No groups were squashed or removed.[/yellow]")
             console.input("[dim]Press Enter to continue...[/dim]")
             continue
 
@@ -496,10 +531,12 @@ def run(session: Session) -> None:
         show_status(filename)
         preview_df(final_df, title="Squash Result")
 
-        total_original = sum(len(grp) for grp in squashed_original_rows)
+        total_squashed_rows = sum(len(grp) for grp in squashed_original_rows)
+        total_removed_rows = sum(len(grp) for grp in removed_original_rows)
         console.print(
             f"[dim]{squashed_count} group(s) squashed "
-            f"({total_original} rows \u2192 {squashed_count}). "
+            f"({total_squashed_rows} rows \u2192 {squashed_count}). "
+            f"{removed_count} group(s) removed ({total_removed_rows} rows). "
             f"{len(skipped_groups)} group(s) skipped.[/dim]\n"
         )
 
@@ -508,6 +545,10 @@ def run(session: Session) -> None:
                 squash_path = session.output_dir / squash_file
                 if squash_path.exists():
                     squash_path.unlink()
+            if remove_file:
+                remove_path = session.output_dir / remove_file
+                if remove_path.exists():
+                    remove_path.unlink()
             continue
 
         out = session.save_step(final_df, "squash")
@@ -515,9 +556,11 @@ def run(session: Session) -> None:
             "Squash",
             f"Identity columns: {id_columns} | "
             f"Groups squashed: {squashed_count} | "
+            f"Groups removed: {removed_count} ({total_removed_rows} rows) | "
             f"Rows before: {len(df)} | Rows after: {len(final_df)} | "
             f"Saved: {out.name}"
-            + (f" | Squashed rows file: {squash_file}" if squash_file else ""),
+            + (f" | Squashed rows file: {squash_file}" if squash_file else "")
+            + (f" | Removed rows file: {remove_file}" if remove_file else ""),
         )
 
         console.print(
@@ -525,7 +568,12 @@ def run(session: Session) -> None:
         )
         if squash_file:
             console.print(
-                f"[dim]Original squashed rows saved to: {squash_file}[/dim]\n"
+                f"[dim]Original squashed rows saved to: {squash_file}[/dim]"
             )
+        if remove_file and removed_count > 0:
+            console.print(
+                f"[dim]Removed rows saved to: {remove_file}[/dim]"
+            )
+        console.print()
         console.input("[dim]Press Enter to continue...[/dim]")
         return

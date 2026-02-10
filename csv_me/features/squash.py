@@ -20,6 +20,9 @@ def _best_effort_values(group: pd.DataFrame, all_columns: list[str], id_columns:
     """
     result: dict[str, str] = {}
     for col in all_columns:
+        if col not in group.columns:
+            result[col] = ""
+            continue
         if col in id_columns:
             result[col] = str(group[col].iloc[0])
             continue
@@ -32,26 +35,72 @@ def _best_effort_values(group: pd.DataFrame, all_columns: list[str], id_columns:
     return result
 
 
+def _curses_text_input(stdscr: Any, prompt: str) -> str | None:
+    """Inline text input at the bottom of the curses screen.
+
+    Returns the entered string, or None if the user pressed Esc.
+    """
+    height, width = stdscr.getmaxyx()
+    y = height - 1
+    text = ""
+    cursor = 0
+    prompt_len = min(len(prompt), width - 1)
+
+    while True:
+        max_text = max(width - prompt_len - 1, 1)
+        display = text[:max_text]
+        try:
+            stdscr.move(y, 0)
+            stdscr.clrtoeol()
+            stdscr.addnstr(y, 0, prompt, width - 1, curses.A_BOLD)
+            if display:
+                stdscr.addnstr(y, prompt_len, display, max_text)
+            stdscr.move(y, prompt_len + min(cursor, max_text))
+        except curses.error:
+            pass
+        stdscr.refresh()
+
+        key = stdscr.getch()
+        if key == 27:  # Esc — cancel
+            return None
+        elif key in (10, 13, curses.KEY_ENTER):
+            return text.strip()
+        elif key in (curses.KEY_BACKSPACE, 127, 8):
+            if cursor > 0:
+                text = text[: cursor - 1] + text[cursor:]
+                cursor -= 1
+        elif key == curses.KEY_LEFT:
+            if cursor > 0:
+                cursor -= 1
+        elif key == curses.KEY_RIGHT:
+            if cursor < len(text):
+                cursor += 1
+        elif 32 <= key <= 126:
+            text = text[:cursor] + chr(key) + text[cursor:]
+            cursor += 1
+
+
 def _squash_editor(
     stdscr: Any,
     columns: list[str],
     values: dict[str, str],
     group: pd.DataFrame,
     header_info: str,
-) -> dict[str, str] | None:
+) -> tuple[dict[str, str], list[str], list[str]] | None:
     """Curses-based squash editor.
 
     Top section shows the original rows in compact text.
     Bottom section shows the editable suggested squash row with
     arrow-key navigation and inline editing (same UX as manual_edit).
 
-    Returns the edited values dict, or None to skip this group.
+    Returns (edited_values, new_columns, ordered_columns) or None to skip.
     """
     curses.curs_set(1)
     curses.use_default_colors()
     stdscr.keypad(True)
 
     cols = list(columns)
+    new_cols: list[str] = []
     edited = {col: str(v) for col, v in values.items()}
     cursor_pos = {col: len(edited[col]) for col in cols}
     current_field = 0
@@ -97,7 +146,7 @@ def _squash_editor(
                 y, 0,
                 "  [\u2191\u2193] Navigate  [\u2190\u2192] Cursor  "
                 "[Shift+\u2191\u2193] Scroll rows  [Shift+\u2190\u2192] Scroll columns  "
-                "[Enter] Save  [Esc] Skip",
+                "[Ctrl+N] New column  [Enter] Save  [Esc] Skip",
                 width - 1, curses.A_DIM,
             )
             y += 2
@@ -119,7 +168,7 @@ def _squash_editor(
         row_num_width = len(str(max_row_num))
         row_prefix_len = len(f"    Row {'0' * row_num_width}:  ")
         header_line = " " * row_prefix_len + " | ".join(
-            c.ljust(col_widths[c]) for c in visible_cols
+            c.ljust(col_widths.get(c, len(c))) for c in visible_cols
         )
 
         # Build row lines from visible columns, apply row_scroll
@@ -128,7 +177,7 @@ def _squash_editor(
         all_row_lines: list[str] = []
         for row_num, rd in visible_row_data:
             num_str = str(row_num).rjust(row_num_width)
-            vals = [rd[col].ljust(col_widths[col]) for col in visible_cols]
+            vals = [rd.get(col, "").ljust(col_widths.get(col, len(col))) for col in visible_cols]
             all_row_lines.append(f"    Row {num_str}:  " + " | ".join(vals))
 
         # Reserve at least (len(cols) + 3) lines for the edit section
@@ -222,7 +271,30 @@ def _squash_editor(
         if key == 27:  # Esc — skip
             return None
         elif key in (10, 13, curses.KEY_ENTER):
-            return edited
+            return edited, new_cols, cols
+        elif key == 14:  # Ctrl+N — add new column
+            name = _curses_text_input(stdscr, "New column name: ")
+            if name and name not in cols:
+                insert_at = current_field + 1
+                cols.insert(insert_at, name)
+                new_cols.append(name)
+                edited[name] = ""
+                cursor_pos[name] = 0
+                col_widths[name] = len(name)
+                max_col_len = max(max_col_len, len(name))
+                current_field = insert_at
+            elif name and name in cols:
+                try:
+                    h, w = stdscr.getmaxyx()
+                    stdscr.addnstr(
+                        h - 1, 0,
+                        f"Column '{name}' already exists.",
+                        w - 1, curses.A_BOLD,
+                    )
+                    stdscr.refresh()
+                    curses.napms(1000)
+                except curses.error:
+                    pass
         elif key == SHIFT_LEFT:
             if col_scroll > 0:
                 col_scroll -= 1
@@ -271,10 +343,10 @@ def _edit_squash_curses(
     values: dict[str, str],
     group: pd.DataFrame,
     header_info: str,
-) -> dict[str, str] | None:
+) -> tuple[dict[str, str], list[str], list[str]] | None:
     """Launch the curses squash editor.
 
-    Returns edited values dict, or None to skip.
+    Returns (edited_values, new_columns, ordered_columns) or None to skip.
     """
     return curses.wrapper(_squash_editor, columns, values, group, header_info)
 
@@ -374,8 +446,16 @@ def run(session: Session) -> None:
                 console.input("[dim]Press Enter to continue...[/dim]")
                 continue
 
+            edited_values, new_cols, ordered_cols = result
+
+            # Register any new columns and update column ordering
+            for nc in new_cols:
+                if nc not in df.columns:
+                    df[nc] = ""
+            columns = ordered_cols
+
             # Got edited values back
-            result_rows.append(result)
+            result_rows.append(edited_values)
             squashed_count += 1
             squashed_original_rows.append(group)
 
@@ -408,6 +488,8 @@ def run(session: Session) -> None:
             parts.append(squashed_df)
 
         final_df = pd.concat(parts, ignore_index=True)
+        # Reorder columns to match the user's ordering (including new columns)
+        final_df = final_df.reindex(columns=columns, fill_value="")
 
         # --- Preview and save ---
         clear_screen()

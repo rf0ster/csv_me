@@ -9,14 +9,20 @@ from pathlib import Path
 class TransformationLogger:
     """Appends transformation records to a log file in the output directory."""
 
-    def __init__(self, output_dir: Path) -> None:
+    def __init__(self, output_dir: Path, append: bool = False) -> None:
         self.log_path = output_dir / "transformation_log.txt"
-        # Write header
-        with open(self.log_path, "w") as f:
-            f.write("=" * 60 + "\n")
-            f.write("CSV-ME Transformation Log\n")
-            f.write(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write("=" * 60 + "\n\n")
+        if append and self.log_path.exists():
+            with open(self.log_path, "a") as f:
+                f.write("\n" + "-" * 60 + "\n")
+                f.write("Session Resumed\n")
+                f.write(f"Resumed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write("-" * 60 + "\n\n")
+        else:
+            with open(self.log_path, "w") as f:
+                f.write("=" * 60 + "\n")
+                f.write("CSV-ME Transformation Log\n")
+                f.write(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write("=" * 60 + "\n\n")
 
     def log(self, action: str, details: str = "") -> None:
         """Append a log entry."""

@@ -67,6 +67,14 @@ def _browse_and_select_csvs(session: Session) -> list[tuple[pd.DataFrame, str]]:
     Returns list of (DataFrame, filename) tuples for selected files.
     """
     source_dir = session.original_path.parent
+    if not source_dir.exists():
+        console.print(
+            f"[yellow]Original file directory no longer exists:[/yellow] {source_dir}\n"
+            f"[dim]Use 'Add a CSV file by path' instead.[/dim]"
+        )
+        console.input("[dim]Press Enter to continue...[/dim]")
+        return []
+
     csv_files = sorted(
         [f for f in source_dir.iterdir() if f.suffix.lower() == ".csv" and f != session.original_path],
         key=lambda f: f.name.lower(),

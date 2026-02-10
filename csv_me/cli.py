@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import sys
+from pathlib import Path
 
 from rich.console import Console
 from rich.panel import Panel
@@ -42,10 +44,12 @@ def _register_features() -> None:
 
 
 def _get_input_path() -> str:
-    """Get CSV path from CLI args or prompt."""
+    """Get CSV path or output folder from CLI args or prompt."""
     if len(sys.argv) > 1:
         return sys.argv[1]
-    return Prompt.ask("[bold green]Enter the path to your CSV file[/bold green]")
+    return Prompt.ask(
+        "[bold green]Enter the path to a CSV file or a previous output folder[/bold green]"
+    )
 
 
 def main() -> None:
@@ -61,15 +65,36 @@ def main() -> None:
 
     path = _get_input_path()
     try:
-        session = Session(path)
+        if Session.is_csv_me_output_dir(path):
+            session = Session.from_output_dir(path)
+            console.print(
+                f"[green]Resumed session:[/green] step {session.step}  "
+                f"— [bold]{session.current_filename}[/bold]\n"
+                f"  ([dim]{session.output_dir}[/dim])\n"
+            )
+        elif Path(path).resolve().is_dir():
+            console.print(
+                f"[bold red]Error:[/bold red] '{path}' is a directory but not "
+                f"a csv-me output folder (no {Session.MANIFEST_NAME} found).\n"
+                f"Pass a CSV file to start a new session, or a previous "
+                f"csv-me output folder to resume."
+            )
+            sys.exit(1)
+        else:
+            session = Session(path)
+            console.print(
+                f"[green]Loaded:[/green] {session.original_path.name}  "
+                f"([dim]{session.output_dir}[/dim])\n"
+            )
+    except json.JSONDecodeError:
+        console.print(
+            f"[bold red]Error:[/bold red] Session manifest in '{path}' is "
+            f"corrupted (invalid JSON)."
+        )
+        sys.exit(1)
     except (FileNotFoundError, ValueError) as e:
         console.print(f"[bold red]Error:[/bold red] {e}")
         sys.exit(1)
-
-    console.print(
-        f"[green]Loaded:[/green] {session.original_path.name}  "
-        f"([dim]{session.output_dir}[/dim])\n"
-    )
 
     while True:
         clear_screen()

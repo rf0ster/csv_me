@@ -92,6 +92,35 @@ class Session:
         with open(manifest_path, "w") as f:
             json.dump(manifest, f, indent=2, default=str)
 
+    def jump_to_step(self, target_index: int) -> Path:
+        """Jump back to a previous step, deleting all later step files.
+
+        Args:
+            target_index: Index into self.history to jump back to.
+                Must be >= 0 and less than the current step.
+
+        Returns:
+            Path to the now-current file.
+        """
+        if target_index < 0 or target_index >= len(self.history):
+            raise ValueError(f"Invalid step index: {target_index}")
+        if target_index >= self.step:
+            raise ValueError(
+                f"Target step {target_index} is not before current step {self.step}"
+            )
+
+        # Delete files for steps after the target
+        for entry in self.history[target_index + 1 :]:
+            if entry.exists():
+                entry.unlink()
+
+        # Truncate history and reset state
+        self.history = self.history[: target_index + 1]
+        self.current_file = self.history[target_index]
+        self.step = target_index
+        self._write_manifest()
+        return self.current_file
+
     @staticmethod
     def is_csv_me_output_dir(path: str) -> bool:
         """Return True if path is a directory containing a csv-me manifest."""

@@ -32,6 +32,7 @@ def _register_features() -> None:
     from csv_me.features.join_csvs import run as join_csvs
     from csv_me.features.remove_columns import run as remove_columns
     from csv_me.features.split_join_rows import run as split_join_rows
+    from csv_me.features.find_replace import run as find_replace
     from csv_me.features.jump_back import run as jump_back
 
     FEATURES.extend(
@@ -44,6 +45,7 @@ def _register_features() -> None:
             ("Split Column", split_column),
             ("Join CSVs", join_csvs),
             ("Split-Join Rows", split_join_rows),
+            ("Find & Replace", find_replace),
             ("Jump to Previous Step", jump_back),
         ]
     )

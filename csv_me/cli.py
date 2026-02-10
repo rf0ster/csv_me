@@ -30,6 +30,7 @@ def _register_features() -> None:
     from csv_me.features.remove_duplicates import run as remove_duplicates
     from csv_me.features.split_column import run as split_column
     from csv_me.features.join_csvs import run as join_csvs
+    from csv_me.features.remove_columns import run as remove_columns
 
     FEATURES.extend(
         [
@@ -37,6 +38,7 @@ def _register_features() -> None:
             ("Normalize Phone Numbers", normalize_phones),
             ("Normalize Currency", normalize_currency),
             ("Remove Duplicates", remove_duplicates),
+            ("Remove Columns", remove_columns),
             ("Split Column", split_column),
             ("Join CSVs", join_csvs),
         ]

@@ -9,12 +9,57 @@ import pandas as pd
 from rich.prompt import Confirm
 
 from csv_me.conditions import (
-    build_conditions,
-    evaluate_conditions,
-    format_condition,
+    build_expression,
+    evaluate_expression,
+    format_expression,
 )
 from csv_me.menu import clear_screen, console, preview_df, show_menu, show_status
 from csv_me.session import Session
+
+
+def _curses_text_input(stdscr: Any, prompt: str) -> str | None:
+    """Inline text input at the bottom of the curses screen.
+
+    Returns the entered string, or None if the user pressed Esc.
+    """
+    height, width = stdscr.getmaxyx()
+    y = height - 1
+    text = ""
+    cursor = 0
+    prompt_len = min(len(prompt), width - 1)
+
+    while True:
+        max_text = max(width - prompt_len - 1, 1)
+        display = text[:max_text]
+        try:
+            stdscr.move(y, 0)
+            stdscr.clrtoeol()
+            stdscr.addnstr(y, 0, prompt, width - 1, curses.A_BOLD)
+            if display:
+                stdscr.addnstr(y, prompt_len, display, max_text)
+            stdscr.move(y, prompt_len + min(cursor, max_text))
+        except curses.error:
+            pass
+        stdscr.refresh()
+
+        key = stdscr.getch()
+        if key == 27:  # Esc — cancel
+            return None
+        elif key in (10, 13, curses.KEY_ENTER):
+            return text.strip()
+        elif key in (curses.KEY_BACKSPACE, 127, 8):
+            if cursor > 0:
+                text = text[: cursor - 1] + text[cursor:]
+                cursor -= 1
+        elif key == curses.KEY_LEFT:
+            if cursor > 0:
+                cursor -= 1
+        elif key == curses.KEY_RIGHT:
+            if cursor < len(text):
+                cursor += 1
+        elif 32 <= key <= 126:
+            text = text[:cursor] + chr(key) + text[cursor:]
+            cursor += 1
 
 
 def _row_editor(
@@ -22,34 +67,41 @@ def _row_editor(
     columns: list[str],
     values: dict[str, str],
     row_info: str,
-) -> dict[str, str] | None:
+) -> tuple[dict[str, str], list[str], list[str]] | None:
     """Curses-based interactive row editor.
 
     Arrow keys navigate between fields, type to edit in-place,
-    Enter saves the row, Esc skips it.
+    Enter saves the row, Esc skips it.  Ctrl+N adds a new column
+    below the current field.
 
-    Returns edited values dict, or None if user pressed Esc.
+    Returns (edited_values, new_columns, ordered_columns) or None if
+    user pressed Esc.  ``ordered_columns`` preserves the insertion
+    position of any newly added columns.
     """
     curses.curs_set(1)
     curses.use_default_colors()
     stdscr.keypad(True)
 
+    cols = list(columns)
+    new_cols: list[str] = []
     current_field = 0
     edited = {col: str(v) for col, v in values.items()}
-    cursor_pos = {col: len(edited[col]) for col in columns}
+    cursor_pos = {col: len(edited[col]) for col in cols}
     scroll_offset = 0
-    max_col_len = max(len(col) for col in columns) if columns else 0
 
     while True:
         height, width = stdscr.getmaxyx()
         stdscr.erase()
+
+        max_col_len = max(len(c) for c in cols) if cols else 0
 
         # Header
         try:
             stdscr.addnstr(0, 0, f"  {row_info}", width - 1, curses.A_BOLD)
             stdscr.addnstr(
                 2, 0,
-                "  [\u2191\u2193] Navigate  [\u2190\u2192] Cursor  [Enter] Save  [Esc] Skip",
+                "  [\u2191\u2193] Navigate  [\u2190\u2192] Cursor  "
+                "[Enter] Save  [Esc] Skip  [Ctrl+N] New column",
                 width - 1, curses.A_DIM,
             )
         except curses.error:
@@ -57,7 +109,7 @@ def _row_editor(
 
         # Scrolling
         field_start_y = 4
-        field_area = max(height - field_start_y - 1, 1)
+        field_area = max(height - field_start_y - 2, 1)
 
         if current_field < scroll_offset:
             scroll_offset = current_field
@@ -66,11 +118,11 @@ def _row_editor(
 
         # Draw fields
         cursor_y, cursor_x = field_start_y, 0
-        visible_end = min(len(columns), scroll_offset + field_area)
+        visible_end = min(len(cols), scroll_offset + field_area)
 
         for i in range(scroll_offset, visible_end):
             y = field_start_y + (i - scroll_offset)
-            col = columns[i]
+            col = cols[i]
             val = edited[col]
             padded = col.rjust(max_col_len)
 
@@ -106,17 +158,39 @@ def _row_editor(
         stdscr.refresh()
 
         key = stdscr.getch()
-        col = columns[current_field]
+        col = cols[current_field]
 
         if key == 27:  # Esc
             return None
         elif key in (10, 13, curses.KEY_ENTER):
-            return edited
+            return edited, new_cols, cols
+        elif key == 14:  # Ctrl+N — add new column
+            name = _curses_text_input(stdscr, "New column name: ")
+            if name and name not in cols:
+                insert_at = current_field + 1
+                cols.insert(insert_at, name)
+                new_cols.append(name)
+                edited[name] = ""
+                cursor_pos[name] = 0
+                current_field = insert_at
+            elif name and name in cols:
+                # Column already exists — flash a brief message
+                try:
+                    h, w = stdscr.getmaxyx()
+                    stdscr.addnstr(
+                        h - 1, 0,
+                        f"Column '{name}' already exists.",
+                        w - 1, curses.A_BOLD,
+                    )
+                    stdscr.refresh()
+                    curses.napms(1000)
+                except curses.error:
+                    pass
         elif key == curses.KEY_UP:
             if current_field > 0:
                 current_field -= 1
         elif key == curses.KEY_DOWN:
-            if current_field < len(columns) - 1:
+            if current_field < len(cols) - 1:
                 current_field += 1
         elif key == curses.KEY_LEFT:
             if cursor_pos[col] > 0:
@@ -147,8 +221,11 @@ def _edit_row_curses(
     columns: list[str],
     values: dict[str, str],
     row_info: str,
-) -> dict[str, str] | None:
-    """Launch the curses row editor. Returns edited values or None (skip)."""
+) -> tuple[dict[str, str], list[str], list[str]] | None:
+    """Launch the curses row editor.
+
+    Returns (edited_values, new_columns, ordered_columns) or None (skip).
+    """
     return curses.wrapper(_row_editor, columns, values, row_info)
 
 
@@ -177,9 +254,9 @@ def run(session: Session) -> None:
                 "[bold]Define search criteria to find rows to edit.[/bold]\n"
             )
 
-        conditions = build_conditions(columns, header_fn=header_fn)
+        expr = build_expression(columns, header_fn=header_fn)
 
-        if not conditions:
+        if not expr.children:
             console.print("[yellow]No conditions defined.[/yellow]")
             console.input("[dim]Press Enter to continue...[/dim]")
             continue
@@ -187,8 +264,7 @@ def run(session: Session) -> None:
         clear_screen()
         show_status(filename)
         console.print("[bold]Search conditions:[/bold]")
-        for c in conditions:
-            console.print(f"  [cyan]IF[/cyan] {format_condition(c)}")
+        console.print(format_expression(expr))
         console.print()
 
         if not Confirm.ask("[bold green]Proceed with search?[/bold green]"):
@@ -199,12 +275,15 @@ def run(session: Session) -> None:
         added_rows: list[dict[str, str]] = []
         total = len(df)
 
-        for idx, row in df.iterrows():
-            if not evaluate_conditions(row, conditions):
+        for idx in list(df.index):
+            row = df.loc[idx]
+            if not evaluate_expression(row, expr):
                 continue
 
             original = {
-                col: "" if pd.isna(row[col]) else str(row[col])
+                col: ""
+                if pd.isna(row.get(col, ""))
+                else str(row.get(col, ""))
                 for col in columns
             }
 
@@ -222,9 +301,18 @@ def run(session: Session) -> None:
                     break
                 continue
 
+            edited_values, new_cols, ordered_cols = result
+
+            # Register any new columns in the DataFrame and update ordering
+            for nc in new_cols:
+                if nc not in df.columns:
+                    df[nc] = ""
+            columns = ordered_cols
+
             # Apply edits
             for col in columns:
-                df.at[idx, col] = result[col]
+                if col in edited_values:
+                    df.at[idx, col] = edited_values[col]
             edited_count += 1
 
             show_status(filename)
@@ -235,12 +323,17 @@ def run(session: Session) -> None:
             ):
                 new_result = _edit_row_curses(
                     columns,
-                    dict(original),
+                    {c: original.get(c, "") for c in columns},
                     f"New row (based on original Row {idx + 1})",
                 )
                 clear_screen()
                 if new_result is not None:
-                    added_rows.append(new_result)
+                    new_values, extra_cols, new_ordered_cols = new_result
+                    for nc in extra_cols:
+                        if nc not in df.columns:
+                            df[nc] = ""
+                    columns = new_ordered_cols
+                    added_rows.append(new_values)
                     show_status(filename)
                     console.print("[green]New row added.[/green]\n")
 
@@ -272,7 +365,7 @@ def run(session: Session) -> None:
         session.logger.log(
             "Manual Edit",
             f"Edited {edited_count} row(s), added {len(added_rows)} row(s). "
-            f"Conditions: {[format_condition(c) for c in conditions]} | "
+            f"Conditions: {format_expression(expr)} | "
             f"Saved: {out.name}",
         )
 

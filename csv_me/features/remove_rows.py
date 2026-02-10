@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from rich.prompt import Confirm, Prompt
 
-from csv_me.conditions import build_conditions, evaluate_conditions, format_condition
+from csv_me.conditions import build_expression, evaluate_expression, format_expression
 from csv_me.menu import clear_screen, console, preview_df, show_menu, show_status
 from csv_me.session import Session
 
@@ -37,16 +37,16 @@ def run(session: Session) -> None:
             clear_screen()
             show_status(filename)
 
-        conditions = build_conditions(columns, header_fn=header_fn)
+        expr = build_expression(columns, header_fn=header_fn)
 
-        if not conditions:
+        if not expr.children:
             console.print("[yellow]No conditions defined — nothing to remove.[/yellow]")
             console.input("[dim]Press Enter to continue...[/dim]")
             continue
 
-        # Evaluate: keep rows where conditions do NOT all match
+        # Evaluate: keep rows where expression does NOT match
         mask = df.apply(
-            lambda row: not evaluate_conditions(row, conditions), axis=1
+            lambda row: not evaluate_expression(row, expr), axis=1
         )
         result_df = df[mask].reset_index(drop=True)
         removed_count = len(df) - len(result_df)
@@ -60,8 +60,7 @@ def run(session: Session) -> None:
             f"[bold]{len(result_df)}[/bold] row(s) remaining.\n"
         )
         console.print("[bold]Conditions:[/bold]")
-        for cond in conditions:
-            console.print(f"  [cyan]IF[/cyan] {format_condition(cond)}")
+        console.print(format_expression(expr))
         console.print()
 
         if not Confirm.ask("[bold green]Proceed with removal?[/bold green]"):
@@ -80,10 +79,9 @@ def run(session: Session) -> None:
         removed_df.to_csv(removed_path, index=False)
 
         out = session.save_step(result_df, "remove_rows")
-        condition_summary = [format_condition(c) for c in conditions]
         session.logger.log(
             "Remove Rows",
-            f"Conditions: {condition_summary} | "
+            f"Conditions: {format_expression(expr)} | "
             f"Removed: {removed_count} | Remaining: {len(result_df)} | "
             f"Removed rows saved: {removed_path.name} | "
             f"Saved: {out.name}",

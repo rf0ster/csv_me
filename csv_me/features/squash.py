@@ -677,6 +677,12 @@ def run(session: Session) -> None:
         removed_cols = {col for col, s in strategies.items() if s.strategy == "remove"}
         working_columns = [c for c in columns if c not in removed_cols]
 
+        # Apply renames early so the editor and all downstream logic use new names
+        if renames:
+            df = df.rename(columns=renames)
+            working_columns = [renames.get(c, c) for c in working_columns]
+            strategies = {renames.get(k, k): v for k, v in strategies.items()}
+
         # --- Find groups with duplicates ---
         grouped = df.groupby(id_columns, sort=False)
         dup_groups = [(key, grp) for key, grp in grouped if len(grp) > 1]
@@ -864,10 +870,6 @@ def run(session: Session) -> None:
         final_df = pd.concat(parts, ignore_index=True)
         # Reorder columns to match the user's ordering (including new columns)
         final_df = final_df.reindex(columns=working_columns, fill_value="")
-
-        # Apply column renames
-        if renames:
-            final_df = final_df.rename(columns=renames)
 
         # --- Preview and save ---
         clear_screen()

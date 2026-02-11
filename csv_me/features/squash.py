@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import curses
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -14,11 +15,32 @@ from csv_me.menu import clear_screen, console, pick_columns, preview_df, show_me
 from csv_me.session import Session
 
 
-def _best_effort_values(group: pd.DataFrame, all_columns: list[str], id_columns: list[str]) -> dict[str, str]:
-    """Build a best-effort squashed row using the most common value per column.
+@dataclass
+class SquashStrategy:
+    strategy: str  # "majority" | "first" | "last" | "concatenate" | "remove"
+    delimiter: str = ""  # Only used for "concatenate"
+    deduplicate: bool = False  # Only used for "concatenate"
+
+
+STRATEGY_LABELS = [
+    "First (value from first row)",
+    "Last (value from last row)",
+    "Concatenate (join all values with delimiter)",
+    "Remove (exclude column from output)",
+]
+
+
+def _best_effort_values(
+    group: pd.DataFrame,
+    all_columns: list[str],
+    id_columns: list[str],
+    strategies: dict[str, SquashStrategy] | None = None,
+) -> dict[str, str]:
+    """Build a best-effort squashed row using per-column strategies.
 
     For identity columns the value is constant across the group.
-    For other columns the mode (most frequent non-null value) is used.
+    For other columns the strategy determines the value (default: majority/mode).
+    Columns with "remove" strategy are skipped entirely.
     """
     result: dict[str, str] = {}
     for col in all_columns:
@@ -28,13 +50,127 @@ def _best_effort_values(group: pd.DataFrame, all_columns: list[str], id_columns:
         if col in id_columns:
             result[col] = str(group[col].iloc[0])
             continue
-        non_null = group[col].dropna()
-        if non_null.empty:
-            result[col] = ""
+
+        strat = strategies.get(col) if strategies else None
+        strategy_name = strat.strategy if strat else "majority"
+
+        if strategy_name == "remove":
             continue
-        mode = non_null.astype(str).mode()
-        result[col] = str(mode.iloc[0]) if not mode.empty else str(non_null.iloc[0])
+        elif strategy_name == "first":
+            val = group[col].iloc[0]
+            result[col] = "" if pd.isna(val) else str(val)
+        elif strategy_name == "last":
+            val = group[col].iloc[-1]
+            result[col] = "" if pd.isna(val) else str(val)
+        elif strategy_name == "concatenate":
+            delimiter = strat.delimiter if strat else ", "
+            values_list = group[col].dropna().astype(str)
+            if strat and strat.deduplicate:
+                values_list = values_list.drop_duplicates()
+            result[col] = delimiter.join(values_list)
+        else:  # majority (default)
+            non_null = group[col].dropna()
+            if non_null.empty:
+                result[col] = ""
+                continue
+            mode = non_null.astype(str).mode()
+            result[col] = str(mode.iloc[0]) if not mode.empty else str(non_null.iloc[0])
     return result
+
+
+def _show_strategy_progress(
+    strategies: dict[str, SquashStrategy],
+    columns: list[str],
+    id_columns: list[str],
+) -> None:
+    """Display assigned strategies so far during configuration."""
+    if not strategies:
+        return
+    console.print("[bold]Strategies so far:[/bold]")
+    for col in columns:
+        if col in id_columns:
+            continue
+        strat = strategies.get(col)
+        if strat is None:
+            continue
+        label = strat.strategy.capitalize()
+        if strat.strategy == "concatenate":
+            label += f" (delimiter: {strat.delimiter!r}, dedup: {strat.deduplicate})"
+        console.print(f"  {col}: [cyan]{label}[/cyan]")
+    console.print()
+
+
+def _configure_strategies(
+    columns: list[str],
+    id_columns: list[str],
+    filename: str,
+) -> tuple[dict[str, SquashStrategy], dict[str, str]]:
+    """Interactively configure per-column squash strategies and optional renames.
+
+    Returns (strategies_dict, renames_dict). Empty dicts mean all-majority / no renames.
+    """
+    if not Confirm.ask(
+        "[bold green]Define squash strategies for each column?[/bold green]",
+        default=False,
+    ):
+        return {}, {}
+
+    non_id_cols = [c for c in columns if c not in id_columns]
+    strategies: dict[str, SquashStrategy] = {}
+
+    for col in non_id_cols:
+        clear_screen()
+        show_status(filename)
+        _show_strategy_progress(strategies, columns, id_columns)
+
+        choice = show_menu(
+            f"Strategy for '{col}'",
+            STRATEGY_LABELS,
+            back_label="Majority (default)",
+        )
+
+        if choice == 0:
+            strategies[col] = SquashStrategy(strategy="majority")
+        elif choice == 1:
+            strategies[col] = SquashStrategy(strategy="first")
+        elif choice == 2:
+            strategies[col] = SquashStrategy(strategy="last")
+        elif choice == 3:
+            delimiter = Prompt.ask("Delimiter", default=", ")
+            deduplicate = Confirm.ask("Remove duplicate values?", default=False)
+            strategies[col] = SquashStrategy(strategy="concatenate", delimiter=delimiter, deduplicate=deduplicate)
+        elif choice == 4:
+            strategies[col] = SquashStrategy(strategy="remove")
+
+    # Show summary
+    clear_screen()
+    show_status(filename)
+    console.print("[bold]Strategy summary:[/bold]")
+    for col in columns:
+        if col in id_columns:
+            console.print(f"  {col}: [dim]Identity[/dim]")
+        else:
+            strat = strategies.get(col)
+            label = strat.strategy.capitalize() if strat else "Majority"
+            if strat and strat.strategy == "concatenate":
+                label += f" (delimiter: {strat.delimiter!r}, dedup: {strat.deduplicate})"
+            console.print(f"  {col}: [cyan]{label}[/cyan]")
+    console.print()
+
+    # Optional renames
+    renames: dict[str, str] = {}
+    non_removed = [c for c in non_id_cols if strategies.get(c, SquashStrategy("majority")).strategy != "remove"]
+
+    if non_removed and Confirm.ask(
+        "[bold green]Rename any output columns?[/bold green]",
+        default=False,
+    ):
+        for col in non_removed:
+            new_name = Prompt.ask(f"New name for '{col}'", default=col)
+            if new_name != col:
+                renames[col] = new_name
+
+    return strategies, renames
 
 
 def _curses_text_input(stdscr: Any, prompt: str) -> str | None:
@@ -405,7 +541,14 @@ def _edit_squash_curses(
     return curses.wrapper(_squash_editor, columns, values, group, header_info)
 
 
-def _init_report(output_dir: Path, step: int, columns: list[str]) -> Path:
+def _init_report(
+    output_dir: Path,
+    step: int,
+    columns: list[str],
+    strategies: dict[str, SquashStrategy] | None = None,
+    renames: dict[str, str] | None = None,
+    id_columns: list[str] | None = None,
+) -> Path:
     """Create the squash report file with a header.
 
     Uses the next step number so the filename is unique per squash run.
@@ -421,6 +564,25 @@ def _init_report(output_dir: Path, step: int, columns: list[str]) -> Path:
 
         col_header = " | ".join(columns)
         f.write(f"Columns: {col_header}\n\n")
+
+        if strategies and id_columns is not None:
+            f.write("Squash Strategies:\n")
+            for col in columns:
+                if col in id_columns:
+                    f.write(f"  {col}: Identity\n")
+                else:
+                    strat = strategies.get(col)
+                    label = strat.strategy.capitalize() if strat else "Majority"
+                    if strat and strat.strategy == "concatenate":
+                        label += f" (delimiter: {strat.delimiter!r}, dedup: {strat.deduplicate})"
+                    f.write(f"  {col}: {label}\n")
+            f.write("\n")
+
+        if renames:
+            f.write("Column Renames:\n")
+            for old_name, new_name in renames.items():
+                f.write(f"  {old_name} -> {new_name}\n")
+            f.write("\n")
 
     return report_path
 
@@ -510,6 +672,11 @@ def run(session: Session) -> None:
 
         console.print(f"\n[dim]Identity columns: {', '.join(id_columns)}[/dim]\n")
 
+        # --- Configure per-column strategies ---
+        strategies, renames = _configure_strategies(columns, id_columns, filename)
+        removed_cols = {col for col, s in strategies.items() if s.strategy == "remove"}
+        working_columns = [c for c in columns if c not in removed_cols]
+
         # --- Find groups with duplicates ---
         grouped = df.groupby(id_columns, sort=False)
         dup_groups = [(key, grp) for key, grp in grouped if len(grp) > 1]
@@ -533,7 +700,12 @@ def run(session: Session) -> None:
         result_rows: list[dict[str, str]] = []
         added_rows: list[dict[str, str]] = []
         skipped_groups: list[pd.DataFrame] = []
-        report_path = _init_report(session.output_dir, session.step, columns)
+        report_path = _init_report(
+            session.output_dir, session.step, working_columns,
+            strategies=strategies or None,
+            renames=renames or None,
+            id_columns=id_columns,
+        )
 
         # Collect non-duplicate rows (pass through unchanged)
         non_dup_indices = set()
@@ -558,8 +730,8 @@ def run(session: Session) -> None:
                 f"({id_desc})  [{len(group)} rows]"
             )
 
-            best = _best_effort_values(group, columns, id_columns)
-            result = _edit_squash_curses(columns, best, group, header)
+            best = _best_effort_values(group, working_columns, id_columns, strategies or None)
+            result = _edit_squash_curses(working_columns, best, group, header)
             clear_screen()
 
             if result == "terminate":
@@ -591,7 +763,7 @@ def run(session: Session) -> None:
                 for nc in new_cols:
                     if nc not in df.columns:
                         df[nc] = ""
-                columns = ordered_cols
+                working_columns = ordered_cols
 
                 # Got edited values back
                 result_rows.append(edited_values)
@@ -616,8 +788,8 @@ def run(session: Session) -> None:
                         f"({id_desc})"
                     )
                     new_result = _edit_squash_curses(
-                        columns,
-                        {c: edited_values.get(c, "") for c in columns},
+                        working_columns,
+                        {c: edited_values.get(c, "") for c in working_columns},
                         group,
                         new_header,
                     )
@@ -627,7 +799,7 @@ def run(session: Session) -> None:
                         for nc in extra_cols:
                             if nc not in df.columns:
                                 df[nc] = ""
-                        columns = new_ordered_cols
+                        working_columns = new_ordered_cols
                         added_rows.append(new_values)
                         group_new_rows.append(new_values)
                         show_status(filename)
@@ -640,14 +812,14 @@ def run(session: Session) -> None:
                 for _, row in group.iterrows():
                     orig_rows.append({
                         col: "" if pd.isna(row.get(col, "")) else str(row.get(col, ""))
-                        for col in columns
+                        for col in working_columns
                     })
-                _append_report_record(report_path, columns, {
+                _append_report_record(report_path, working_columns, {
                     "group_num": group_num,
                     "id_desc": id_desc,
                     "original_rows": orig_rows,
-                    "output_row": {c: edited_values.get(c, "") for c in columns},
-                    "new_rows": [{c: nv.get(c, "") for c in columns} for nv in group_new_rows]
+                    "output_row": {c: edited_values.get(c, "") for c in working_columns},
+                    "new_rows": [{c: nv.get(c, "") for c in working_columns} for nv in group_new_rows]
                     if group_new_rows
                     else None,
                 })
@@ -672,21 +844,30 @@ def run(session: Session) -> None:
             continue
 
         # --- Build final DataFrame ---
-        non_dup_df = df.loc[sorted(non_dup_indices)] if non_dup_indices else pd.DataFrame(columns=columns)
+        non_dup_df = df.loc[sorted(non_dup_indices)] if non_dup_indices else pd.DataFrame(columns=working_columns)
+        # Drop removed columns from non-duplicate rows
+        if removed_cols:
+            non_dup_df = non_dup_df.drop(columns=[c for c in removed_cols if c in non_dup_df.columns])
 
         parts = [non_dup_df]
         for grp in skipped_groups:
+            if removed_cols:
+                grp = grp.drop(columns=[c for c in removed_cols if c in grp.columns])
             parts.append(grp)
         if result_rows:
-            squashed_df = pd.DataFrame(result_rows, columns=columns)
+            squashed_df = pd.DataFrame(result_rows, columns=working_columns)
             parts.append(squashed_df)
         if added_rows:
-            added_df = pd.DataFrame(added_rows, columns=columns)
+            added_df = pd.DataFrame(added_rows, columns=working_columns)
             parts.append(added_df)
 
         final_df = pd.concat(parts, ignore_index=True)
         # Reorder columns to match the user's ordering (including new columns)
-        final_df = final_df.reindex(columns=columns, fill_value="")
+        final_df = final_df.reindex(columns=working_columns, fill_value="")
+
+        # Apply column renames
+        if renames:
+            final_df = final_df.rename(columns=renames)
 
         # --- Preview and save ---
         clear_screen()
@@ -718,6 +899,26 @@ def run(session: Session) -> None:
 
         out = session.save_step(final_df, "squash")
 
+        strategy_summary = ""
+        if strategies:
+            parts_str = []
+            for col in working_columns:
+                if col in id_columns:
+                    continue
+                strat = strategies.get(col)
+                label = strat.strategy if strat else "majority"
+                if strat and strat.strategy == "concatenate":
+                    label += f"({strat.delimiter!r}, dedup={strat.deduplicate})"
+                parts_str.append(f"{col}={label}")
+            strategy_summary = f" | Strategies: {', '.join(parts_str)}"
+        if removed_cols:
+            strategy_summary += f" | Removed columns: {', '.join(sorted(removed_cols))}"
+        rename_summary = ""
+        if renames:
+            rename_summary = " | Renames: " + ", ".join(
+                f"{old}->{new}" for old, new in renames.items()
+            )
+
         session.logger.log(
             "Squash",
             f"Identity columns: {id_columns} | "
@@ -727,7 +928,9 @@ def run(session: Session) -> None:
             f"Rows before: {len(df)} | Rows after: {len(final_df)} | "
             f"Saved: {out.name}"
             + (f" | Squashed rows file: {squash_file}" if squash_file else "")
-            + (f" | Removed rows file: {remove_file}" if remove_file else ""),
+            + (f" | Removed rows file: {remove_file}" if remove_file else "")
+            + strategy_summary
+            + rename_summary,
         )
 
         report_msg = ""

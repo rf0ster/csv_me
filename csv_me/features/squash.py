@@ -102,7 +102,9 @@ def _squash_editor(
     curses.curs_set(1)
     curses.use_default_colors()
     curses.init_pair(1, curses.COLOR_YELLOW, -1)
+    curses.init_pair(2, curses.COLOR_CYAN, -1)
     modified_attr = curses.color_pair(1) | curses.A_BOLD
+    differ_attr = curses.color_pair(2)
     stdscr.keypad(True)
 
     original_values = {col: str(v) for col, v in values.items()}
@@ -133,6 +135,14 @@ def _squash_editor(
             col: "" if pd.isna(row.get(col, "")) else str(row.get(col, ""))
             for col in cols
         }))
+
+    # Detect columns where values differ across rows
+    differing_cols: set[str] = set()
+    if len(row_data) > 1:
+        for col in cols:
+            unique_vals = {rd.get(col, "") for _, rd in row_data}
+            if len(unique_vals) > 1:
+                differing_cols.add(col)
 
     SHIFT_UP = curses.KEY_SR
     SHIFT_DOWN = curses.KEY_SF
@@ -173,36 +183,40 @@ def _squash_editor(
         # Build header + row lines from visible columns
         max_row_num = max(rn for rn, _ in row_data)
         row_num_width = len(str(max_row_num))
-        row_prefix_len = len(f"    Row {'0' * row_num_width}:  ")
-        header_line = " " * row_prefix_len + " | ".join(
-            c.ljust(col_widths.get(c, len(c))) for c in visible_cols
-        )
+        row_prefix = f"    Row {'0' * row_num_width}:  "
+        row_prefix_len = len(row_prefix)
+        sep = " | "
 
-        # Build row lines from visible columns, apply row_scroll
+        # Build row data from visible columns, apply row_scroll
         visible_row_data = row_data[row_scroll:]
-
-        all_row_lines: list[str] = []
-        for row_num, rd in visible_row_data:
-            num_str = str(row_num).rjust(row_num_width)
-            vals = [rd.get(col, "").ljust(col_widths.get(col, len(col))) for col in visible_cols]
-            all_row_lines.append(f"    Row {num_str}:  " + " | ".join(vals))
 
         # Reserve at least (len(cols) + 3) lines for the edit section
         edit_section_min = len(cols) + 3
         # Budget: 1 for header + as many rows as fit
         orig_budget = max(height - y - edit_section_min - 1, 2)
 
-        # Always show column header
+        # Draw column header row with per-column highlighting
         try:
-            stdscr.addnstr(y, 0, header_line, width - 1, curses.A_DIM)
+            x = row_prefix_len
+            stdscr.addnstr(y, 0, " " * row_prefix_len, width - 1, curses.A_DIM)
+            for ci, col in enumerate(visible_cols):
+                if x >= width - 1:
+                    break
+                cell = col.ljust(col_widths.get(col, len(col)))
+                attr = differ_attr if col in differing_cols else curses.A_DIM
+                stdscr.addnstr(y, x, cell, max(width - 1 - x, 0), attr)
+                x += len(cell)
+                if ci < len(visible_cols) - 1 and x < width - 1:
+                    stdscr.addnstr(y, x, sep, max(width - 1 - x, 0), curses.A_DIM)
+                    x += len(sep)
             y += 1
         except curses.error:
             pass
         row_budget = orig_budget - 1  # subtract header line
 
-        for i, line in enumerate(all_row_lines):
+        for i, (row_num, rd) in enumerate(visible_row_data):
             if i >= row_budget:
-                remaining = len(all_row_lines) - i
+                remaining = len(visible_row_data) - i
                 try:
                     stdscr.addnstr(y, 0, f"    ... ({remaining} more row{'s' if remaining != 1 else ''})", width - 1, curses.A_DIM)
                     y += 1
@@ -210,7 +224,20 @@ def _squash_editor(
                     pass
                 break
             try:
-                stdscr.addnstr(y, 0, line, width - 1, curses.A_DIM)
+                num_str = str(row_num).rjust(row_num_width)
+                prefix = f"    Row {num_str}:  "
+                stdscr.addnstr(y, 0, prefix, width - 1, curses.A_DIM)
+                x = len(prefix)
+                for ci, col in enumerate(visible_cols):
+                    if x >= width - 1:
+                        break
+                    cell = rd.get(col, "").ljust(col_widths.get(col, len(col)))
+                    attr = differ_attr if col in differing_cols else curses.A_DIM
+                    stdscr.addnstr(y, x, cell, max(width - 1 - x, 0), attr)
+                    x += len(cell)
+                    if ci < len(visible_cols) - 1 and x < width - 1:
+                        stdscr.addnstr(y, x, sep, max(width - 1 - x, 0), curses.A_DIM)
+                        x += len(sep)
                 y += 1
             except curses.error:
                 pass

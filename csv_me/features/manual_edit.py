@@ -251,51 +251,53 @@ def _edit_row_curses(
     return curses.wrapper(_row_editor, columns, values, row_info)
 
 
-def _write_report(
-    output_dir: Path,
-    step_filename: str,
-    columns: list[str],
-    records: list[dict],
-) -> Path:
-    """Write a manual-edit change report to the output directory.
-
-    Each record is a dict with keys:
-        row_num: 1-based row number in the original DataFrame
-        original: dict of original cell values
-        edited: dict of edited cell values (or None if unchanged)
-        new_row: dict of newly added row values (or None)
-    """
-    stem = Path(step_filename).stem
-    report_path = output_dir / f"{stem}_report.txt"
+def _init_edit_report(report_path: Path, step_label: str) -> None:
+    """Create the edit report file with a header."""
     sep = "=" * 60
-
     with open(report_path, "w") as f:
         f.write(f"{sep}\n")
         f.write("Manual Edit Report\n")
-        f.write(f"Step: {step_filename}\n")
+        f.write(f"Step: {step_label}\n")
         f.write(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"{sep}\n\n")
 
-        col_header = " | ".join(columns)
-        f.write(f"Columns: {col_header}\n\n")
 
-        for rec in records:
-            f.write(f"--- Row {rec['row_num']} ---\n")
+def _append_edit_entry(
+    report_path: Path,
+    row_num: int,
+    columns: list[str],
+    original: dict[str, str],
+    edited: dict[str, str] | None = None,
+    new_row: dict[str, str] | None = None,
+    removed: bool = False,
+) -> None:
+    """Append a single row-edit entry to the report file."""
+    col_header = " | ".join(columns)
+    orig_vals = " | ".join(original.get(c, "") for c in columns)
 
-            orig_vals = " | ".join(rec["original"].get(c, "") for c in columns)
-            f.write(f"  Original:  {orig_vals}\n")
+    with open(report_path, "a") as f:
+        if removed:
+            f.write(f"--- Row {row_num} (removed) ---\n")
+        elif new_row is not None and edited is None:
+            f.write(f"--- Row {row_num} \u2192 New Row Added ---\n")
+        else:
+            f.write(f"--- Row {row_num} (edited) ---\n")
 
-            if rec["edited"] is not None:
-                edit_vals = " | ".join(rec["edited"].get(c, "") for c in columns)
-                f.write(f"  Edited:    {edit_vals}\n")
+        f.write(f"  Columns:   {col_header}\n")
+        f.write(f"  Original:  {orig_vals}\n")
 
-            if rec["new_row"] is not None:
-                new_vals = " | ".join(rec["new_row"].get(c, "") for c in columns)
-                f.write(f"  New Row:   {new_vals}\n")
+        if removed:
+            f.write("  [REMOVED]\n")
 
-            f.write("\n")
+        if edited is not None:
+            edit_vals = " | ".join(edited.get(c, "") for c in columns)
+            f.write(f"  Edited:    {edit_vals}\n")
 
-    return report_path
+        if new_row is not None:
+            new_vals = " | ".join(new_row.get(c, "") for c in columns)
+            f.write(f"  New Row:   {new_vals}\n")
+
+        f.write("\n")
 
 
 def run(session: Session) -> None:
@@ -355,8 +357,11 @@ def run(session: Session) -> None:
         added_rows: list[dict[str, str]] = []
         removed_rows: list[dict[str, str]] = []
         removed_indices: list[int] = []
-        change_records: list[dict] = []
         total = len(df)
+        next_step = session.step + 1
+        report_stem = f"{next_step:02d}_manual_edit"
+        report_path = session.output_dir / f"{report_stem}_edited.txt"
+        report_initialized = False
 
         for idx in list(df.index):
             row = df.loc[idx]
@@ -388,6 +393,12 @@ def run(session: Session) -> None:
                 show_status(filename)
                 removed_rows.append(original.copy())
                 removed_indices.append(idx)
+                if not report_initialized:
+                    _init_edit_report(report_path, f"{report_stem}.csv")
+                    report_initialized = True
+                _append_edit_entry(
+                    report_path, idx + 1, columns, original, removed=True,
+                )
                 console.print(f"[red]Row {idx + 1} removed.[/red]")
                 if not Confirm.ask(
                     "[bold green]Continue to next match?[/bold green]"
@@ -406,22 +417,30 @@ def run(session: Session) -> None:
             # Apply edits
             for col in columns:
                 if col in edited_values:
-                    df.at[idx, col] = edited_values[col]
+                    val = edited_values[col]
+                    try:
+                        df.at[idx, col] = val
+                    except (ValueError, TypeError):
+                        try:
+                            df.at[idx, col] = pd.to_numeric(val)
+                        except (ValueError, TypeError):
+                            df[col] = df[col].astype(object)
+                            df.at[idx, col] = val
             edited_count += 1
 
-            # Track changes for the report
+            # Log edit to report immediately
             changed_fields = any(
                 edited_values.get(col, "") != original.get(col, "")
                 for col in columns
             )
-            current_record: dict | None = None
             if changed_fields:
-                current_record = {
-                    "row_num": idx + 1,
-                    "original": original.copy(),
-                    "edited": {c: edited_values.get(c, "") for c in columns},
-                    "new_row": None,
-                }
+                if not report_initialized:
+                    _init_edit_report(report_path, f"{report_stem}.csv")
+                    report_initialized = True
+                _append_edit_entry(
+                    report_path, idx + 1, columns, original,
+                    edited={c: edited_values.get(c, "") for c in columns},
+                )
 
             show_status(filename)
             console.print(f"[green]Row {idx + 1} saved.[/green]\n")
@@ -443,22 +462,16 @@ def run(session: Session) -> None:
                     columns = new_ordered_cols
                     added_rows.append(new_values)
 
-                    # Attach new row to existing record or create one
-                    if current_record is not None:
-                        current_record["new_row"] = new_values.copy()
-                    else:
-                        current_record = {
-                            "row_num": idx + 1,
-                            "original": original.copy(),
-                            "edited": None,
-                            "new_row": new_values.copy(),
-                        }
+                    if not report_initialized:
+                        _init_edit_report(report_path, f"{report_stem}.csv")
+                        report_initialized = True
+                    _append_edit_entry(
+                        report_path, idx + 1, columns, original,
+                        new_row=new_values.copy(),
+                    )
 
                     show_status(filename)
                     console.print("[green]New row added.[/green]\n")
-
-            if current_record is not None:
-                change_records.append(current_record)
 
         # Append new rows
         if added_rows:
@@ -493,6 +506,8 @@ def run(session: Session) -> None:
         )
 
         if not Confirm.ask("[bold green]Save changes?[/bold green]"):
+            if report_initialized and report_path.exists():
+                report_path.unlink()
             continue
 
         out = session.save_step(df, "manual_edit")
@@ -504,12 +519,8 @@ def run(session: Session) -> None:
             f"Saved: {out.name}",
         )
 
-        # Write change report
         report_msg = ""
-        if change_records:
-            report_path = _write_report(
-                session.output_dir, out.name, columns, change_records,
-            )
+        if report_initialized:
             report_msg = f"  Report: [bold]{report_path.name}[/bold]\n"
 
         console.print(

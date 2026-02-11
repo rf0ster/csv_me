@@ -82,8 +82,11 @@ def _row_editor(
     """
     curses.curs_set(1)
     curses.use_default_colors()
+    curses.init_pair(1, curses.COLOR_YELLOW, -1)
+    modified_attr = curses.color_pair(1) | curses.A_BOLD
     stdscr.keypad(True)
 
+    original_values = {col: str(v) for col, v in values.items()}
     cols = list(columns)
     new_cols: list[str] = []
     current_field = 0
@@ -103,7 +106,7 @@ def _row_editor(
             stdscr.addnstr(
                 2, 0,
                 "  [\u2191\u2193] Navigate  [\u2190\u2192] Cursor  "
-                "[Enter] Save  [Esc] Skip  [Ctrl+N] New column  [Ctrl+D] Remove",
+                "[Enter] Save  [Esc] Skip  [Ctrl+N] New column  [Ctrl+D] Remove  [Ctrl+U] Undo",
                 width - 1, curses.A_DIM,
             )
         except curses.error:
@@ -127,6 +130,7 @@ def _row_editor(
             col = cols[i]
             val = edited[col]
             padded = col.rjust(max_col_len)
+            is_modified = val != original_values.get(col, "")
 
             try:
                 if i == current_field:
@@ -136,10 +140,11 @@ def _row_editor(
                     max_val = max(width - val_x - 1, 0)
                     display_val = val[:max_val]
 
+                    label_attr = modified_attr if is_modified else curses.A_BOLD
                     stdscr.addnstr(y, 0, prefix, width - 1, curses.A_BOLD)
                     stdscr.addnstr(
                         y, len(prefix), label,
-                        max(width - 1 - len(prefix), 0), curses.A_BOLD,
+                        max(width - 1 - len(prefix), 0), label_attr,
                     )
                     if display_val:
                         stdscr.addnstr(y, val_x, display_val, max_val)
@@ -147,8 +152,13 @@ def _row_editor(
                     cursor_y = y
                     cursor_x = val_x + min(cursor_pos[col], max_val)
                 else:
-                    line = f"   {padded}:  {val}"
-                    stdscr.addnstr(y, 0, line, width - 1)
+                    label_part = f"   {padded}:  "
+                    label_attr = modified_attr if is_modified else 0
+                    stdscr.addnstr(y, 0, label_part, width - 1, label_attr)
+                    val_x = len(label_part)
+                    max_val = max(width - val_x - 1, 0)
+                    if val and max_val > 0:
+                        stdscr.addnstr(y, val_x, val[:max_val], max_val)
             except curses.error:
                 pass
 
@@ -168,6 +178,13 @@ def _row_editor(
             return "remove"
         elif key in (10, 13, curses.KEY_ENTER):
             return edited, new_cols, cols
+        elif key == 21:  # Ctrl+U — undo all changes
+            cols = list(columns)
+            new_cols = []
+            edited = {col: str(v) for col, v in values.items()}
+            cursor_pos = {col: len(edited[col]) for col in cols}
+            current_field = min(current_field, len(cols) - 1)
+            scroll_offset = 0
         elif key == 14:  # Ctrl+N — add new column
             name = _curses_text_input(stdscr, "New column name: ")
             if name and name not in cols:

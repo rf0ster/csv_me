@@ -96,12 +96,16 @@ def _squash_editor(
     arrow-key navigation and inline editing (same UX as manual_edit).
 
     Returns (edited_values, new_columns, ordered_columns), ``"remove"``
-    to remove the entire group, or None to skip.
+    to remove the entire group, ``"terminate"`` to stop the squash early,
+    or None to skip.
     """
     curses.curs_set(1)
     curses.use_default_colors()
+    curses.init_pair(1, curses.COLOR_YELLOW, -1)
+    modified_attr = curses.color_pair(1) | curses.A_BOLD
     stdscr.keypad(True)
 
+    original_values = {col: str(v) for col, v in values.items()}
     cols = list(columns)
     new_cols: list[str] = []
     edited = {col: str(v) for col, v in values.items()}
@@ -149,7 +153,7 @@ def _squash_editor(
                 y, 0,
                 "  [\u2191\u2193] Navigate  [\u2190\u2192] Cursor  "
                 "[Shift+\u2191\u2193] Scroll rows  [Shift+\u2190\u2192] Scroll columns  "
-                "[Ctrl+N] New column  [Ctrl+D] Remove  [Enter] Save  [Esc] Skip",
+                "[Ctrl+N] New col  [Ctrl+D] Remove  [Ctrl+U] Undo  [Ctrl+T] Stop  [Enter] Save  [Esc] Skip",
                 width - 1, curses.A_DIM,
             )
             y += 2
@@ -236,6 +240,7 @@ def _squash_editor(
             col = cols[i]
             val = edited[col]
             padded = col.rjust(max_col_len)
+            is_modified = val != original_values.get(col, "")
 
             try:
                 if i == current_field:
@@ -245,10 +250,11 @@ def _squash_editor(
                     max_val = max(width - val_x - 1, 0)
                     display_val = val[:max_val]
 
+                    label_attr = modified_attr if is_modified else curses.A_BOLD
                     stdscr.addnstr(fy, 0, prefix, width - 1, curses.A_BOLD)
                     stdscr.addnstr(
                         fy, len(prefix), label,
-                        max(width - 1 - len(prefix), 0), curses.A_BOLD,
+                        max(width - 1 - len(prefix), 0), label_attr,
                     )
                     if display_val:
                         stdscr.addnstr(fy, val_x, display_val, max_val)
@@ -256,8 +262,13 @@ def _squash_editor(
                     cursor_y = fy
                     cursor_x = val_x + min(cursor_pos[col], max_val)
                 else:
-                    line = f"   {padded}:  {val}"
-                    stdscr.addnstr(fy, 0, line, width - 1)
+                    label_part = f"   {padded}:  "
+                    label_attr = modified_attr if is_modified else 0
+                    stdscr.addnstr(fy, 0, label_part, width - 1, label_attr)
+                    val_x = len(label_part)
+                    max_val = max(width - val_x - 1, 0)
+                    if val and max_val > 0:
+                        stdscr.addnstr(fy, val_x, val[:max_val], max_val)
             except curses.error:
                 pass
 
@@ -273,10 +284,20 @@ def _squash_editor(
 
         if key == 27:  # Esc — skip
             return None
+        elif key == 20:  # Ctrl+T — terminate squash early
+            return "terminate"
         elif key == 4:  # Ctrl+D — remove group
             return "remove"
         elif key in (10, 13, curses.KEY_ENTER):
             return edited, new_cols, cols
+        elif key == 21:  # Ctrl+U — undo all changes
+            cols = list(columns)
+            new_cols = []
+            edited = {col: str(v) for col, v in values.items()}
+            cursor_pos = {col: len(edited[col]) for col in cols}
+            max_col_len = max(len(c) for c in cols) if cols else 0
+            current_field = min(current_field, len(cols) - 1)
+            scroll_offset = 0
         elif key == 14:  # Ctrl+N — add new column
             name = _curses_text_input(stdscr, "New column name: ")
             if name and name not in cols:
@@ -351,17 +372,18 @@ def _edit_squash_curses(
 ) -> tuple[dict[str, str], list[str], list[str]] | str | None:
     """Launch the curses squash editor.
 
-    Returns (edited_values, new_columns, ordered_columns), ``"remove"``, or None to skip.
+    Returns (edited_values, new_columns, ordered_columns), ``"remove"``,
+    ``"terminate"``, or None to skip.
     """
     return curses.wrapper(_squash_editor, columns, values, group, header_info)
 
 
-REPORT_FILENAME = "squash_report.txt"
+def _init_report(output_dir: Path, step: int, columns: list[str]) -> Path:
+    """Create the squash report file with a header.
 
-
-def _init_report(output_dir: Path, columns: list[str]) -> Path:
-    """Create the squash report file with a header."""
-    report_path = output_dir / REPORT_FILENAME
+    Uses the next step number so the filename is unique per squash run.
+    """
+    report_path = output_dir / f"{step + 1:02d}_squash_report.txt"
     sep = "=" * 60
 
     with open(report_path, "w") as f:
@@ -484,7 +506,7 @@ def run(session: Session) -> None:
         result_rows: list[dict[str, str]] = []
         added_rows: list[dict[str, str]] = []
         skipped_groups: list[pd.DataFrame] = []
-        report_path = _init_report(session.output_dir, columns)
+        report_path = _init_report(session.output_dir, session.step, columns)
 
         # Collect non-duplicate rows (pass through unchanged)
         non_dup_indices = set()
@@ -492,7 +514,12 @@ def run(session: Session) -> None:
             if len(grp) == 1:
                 non_dup_indices.update(grp.index.tolist())
 
+        stopped_early = False
+        processed_groups: set[int] = set()
+
         for group_num, (key, group) in enumerate(dup_groups, 1):
+            processed_groups.add(group_num)
+
             # Build identity description
             if isinstance(key, tuple):
                 id_desc = ", ".join(f"{c}={k}" for c, k in zip(id_columns, key))
@@ -508,15 +535,16 @@ def run(session: Session) -> None:
             result = _edit_squash_curses(columns, best, group, header)
             clear_screen()
 
-            if result is None:
+            if result == "terminate":
+                skipped_groups.append(group)
+                stopped_early = True
+                break
+            elif result is None:
                 # Skipped
                 skipped_groups.append(group)
                 show_status(filename)
                 console.print("[dim]Group skipped \u2014 original rows kept.[/dim]")
-                console.input("[dim]Press Enter to continue...[/dim]")
-                continue
-
-            if result == "remove":
+            elif result == "remove":
                 removed_count += 1
                 removed_original_rows.append(group)
                 # Write removed rows to file incrementally
@@ -529,83 +557,85 @@ def run(session: Session) -> None:
                     f"[red]Group removed![/red] "
                     f"({len(group)} rows removed)\n"
                 )
-                console.input("[dim]Press Enter to continue...[/dim]")
-                continue
+            else:
+                edited_values, new_cols, ordered_cols = result
 
-            edited_values, new_cols, ordered_cols = result
+                # Register any new columns and update column ordering
+                for nc in new_cols:
+                    if nc not in df.columns:
+                        df[nc] = ""
+                columns = ordered_cols
 
-            # Register any new columns and update column ordering
-            for nc in new_cols:
-                if nc not in df.columns:
-                    df[nc] = ""
-            columns = ordered_cols
+                # Got edited values back
+                result_rows.append(edited_values)
+                squashed_count += 1
+                squashed_original_rows.append(group)
 
-            # Got edited values back
-            result_rows.append(edited_values)
-            squashed_count += 1
-            squashed_original_rows.append(group)
-
-            show_status(filename)
-            console.print(
-                f"[green]Group squashed![/green] "
-                f"({len(group)} rows \u2192 1)\n"
-            )
-
-            # Offer to create new rows based on the squashed values
-            group_new_rows: list[dict[str, str]] = []
-            new_row_count = 0
-            while Confirm.ask(
-                "[bold green]Add a new row based on the squashed values?[/bold green]"
-            ):
-                new_row_count += 1
-                new_header = (
-                    f"New row {new_row_count} \u2014 Group {group_num} of {len(dup_groups)}  "
-                    f"({id_desc})"
+                show_status(filename)
+                console.print(
+                    f"[green]Group squashed![/green] "
+                    f"({len(group)} rows \u2192 1)\n"
                 )
-                new_result = _edit_squash_curses(
-                    columns,
-                    {c: edited_values.get(c, "") for c in columns},
-                    group,
-                    new_header,
-                )
-                clear_screen()
-                if new_result is not None and new_result != "remove":
-                    new_values, extra_cols, new_ordered_cols = new_result
-                    for nc in extra_cols:
-                        if nc not in df.columns:
-                            df[nc] = ""
-                    columns = new_ordered_cols
-                    added_rows.append(new_values)
-                    group_new_rows.append(new_values)
-                    show_status(filename)
-                    console.print(f"[green]New row {new_row_count} added.[/green]\n")
-                else:
-                    show_status(filename)
 
-            # Append to the report immediately
-            orig_rows = []
-            for _, row in group.iterrows():
-                orig_rows.append({
-                    col: "" if pd.isna(row.get(col, "")) else str(row.get(col, ""))
-                    for col in columns
+                # Offer to create new rows based on the squashed values
+                group_new_rows: list[dict[str, str]] = []
+                new_row_count = 0
+                while Confirm.ask(
+                    "[bold green]Add a new row based on the squashed values?[/bold green]"
+                ):
+                    new_row_count += 1
+                    new_header = (
+                        f"New row {new_row_count} \u2014 Group {group_num} of {len(dup_groups)}  "
+                        f"({id_desc})"
+                    )
+                    new_result = _edit_squash_curses(
+                        columns,
+                        {c: edited_values.get(c, "") for c in columns},
+                        group,
+                        new_header,
+                    )
+                    clear_screen()
+                    if new_result is not None and new_result != "remove":
+                        new_values, extra_cols, new_ordered_cols = new_result
+                        for nc in extra_cols:
+                            if nc not in df.columns:
+                                df[nc] = ""
+                        columns = new_ordered_cols
+                        added_rows.append(new_values)
+                        group_new_rows.append(new_values)
+                        show_status(filename)
+                        console.print(f"[green]New row {new_row_count} added.[/green]\n")
+                    else:
+                        show_status(filename)
+
+                # Append to the report immediately
+                orig_rows = []
+                for _, row in group.iterrows():
+                    orig_rows.append({
+                        col: "" if pd.isna(row.get(col, "")) else str(row.get(col, ""))
+                        for col in columns
+                    })
+                _append_report_record(report_path, columns, {
+                    "group_num": group_num,
+                    "id_desc": id_desc,
+                    "original_rows": orig_rows,
+                    "output_row": {c: edited_values.get(c, "") for c in columns},
+                    "new_rows": [{c: nv.get(c, "") for c in columns} for nv in group_new_rows]
+                    if group_new_rows
+                    else None,
                 })
-            _append_report_record(report_path, columns, {
-                "group_num": group_num,
-                "id_desc": id_desc,
-                "original_rows": orig_rows,
-                "output_row": {c: edited_values.get(c, "") for c in columns},
-                "new_rows": [{c: nv.get(c, "") for c in columns} for nv in group_new_rows]
-                if group_new_rows
-                else None,
-            })
 
-            # Write squashed original rows to file incrementally
-            if squash_file:
-                squash_path = session.output_dir / squash_file
-                write_header = not squash_path.exists()
-                group.to_csv(squash_path, mode="a", index=False, header=write_header)
+                # Write squashed original rows to file incrementally
+                if squash_file:
+                    squash_path = session.output_dir / squash_file
+                    write_header = not squash_path.exists()
+                    group.to_csv(squash_path, mode="a", index=False, header=write_header)
 
-            console.input("[dim]Press Enter to continue...[/dim]")
+        # Treat unprocessed groups as skipped
+        if stopped_early:
+            for i, (_, grp) in enumerate(dup_groups, 1):
+                if i not in processed_groups:
+                    skipped_groups.append(grp)
 
         if squashed_count == 0 and removed_count == 0 and not skipped_groups:
             if report_path.exists():
@@ -660,12 +690,6 @@ def run(session: Session) -> None:
             continue
 
         out = session.save_step(final_df, "squash")
-
-        # Rename report to match the step filename
-        final_report_path = session.output_dir / f"{Path(out.name).stem}_report.txt"
-        if report_path.exists():
-            report_path.rename(final_report_path)
-            report_path = final_report_path
 
         session.logger.log(
             "Squash",

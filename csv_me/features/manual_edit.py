@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import curses
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -232,6 +234,53 @@ def _edit_row_curses(
     return curses.wrapper(_row_editor, columns, values, row_info)
 
 
+def _write_report(
+    output_dir: Path,
+    step_filename: str,
+    columns: list[str],
+    records: list[dict],
+) -> Path:
+    """Write a manual-edit change report to the output directory.
+
+    Each record is a dict with keys:
+        row_num: 1-based row number in the original DataFrame
+        original: dict of original cell values
+        edited: dict of edited cell values (or None if unchanged)
+        new_row: dict of newly added row values (or None)
+    """
+    stem = Path(step_filename).stem
+    report_path = output_dir / f"{stem}_report.txt"
+    sep = "=" * 60
+
+    with open(report_path, "w") as f:
+        f.write(f"{sep}\n")
+        f.write("Manual Edit Report\n")
+        f.write(f"Step: {step_filename}\n")
+        f.write(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"{sep}\n\n")
+
+        col_header = " | ".join(columns)
+        f.write(f"Columns: {col_header}\n\n")
+
+        for rec in records:
+            f.write(f"--- Row {rec['row_num']} ---\n")
+
+            orig_vals = " | ".join(rec["original"].get(c, "") for c in columns)
+            f.write(f"  Original:  {orig_vals}\n")
+
+            if rec["edited"] is not None:
+                edit_vals = " | ".join(rec["edited"].get(c, "") for c in columns)
+                f.write(f"  Edited:    {edit_vals}\n")
+
+            if rec["new_row"] is not None:
+                new_vals = " | ".join(rec["new_row"].get(c, "") for c in columns)
+                f.write(f"  New Row:   {new_vals}\n")
+
+            f.write("\n")
+
+    return report_path
+
+
 def run(session: Session) -> None:
     while True:
         clear_screen()
@@ -289,6 +338,7 @@ def run(session: Session) -> None:
         added_rows: list[dict[str, str]] = []
         removed_rows: list[dict[str, str]] = []
         removed_indices: list[int] = []
+        change_records: list[dict] = []
         total = len(df)
 
         for idx in list(df.index):
@@ -342,6 +392,20 @@ def run(session: Session) -> None:
                     df.at[idx, col] = edited_values[col]
             edited_count += 1
 
+            # Track changes for the report
+            changed_fields = any(
+                edited_values.get(col, "") != original.get(col, "")
+                for col in columns
+            )
+            current_record: dict | None = None
+            if changed_fields:
+                current_record = {
+                    "row_num": idx + 1,
+                    "original": original.copy(),
+                    "edited": {c: edited_values.get(c, "") for c in columns},
+                    "new_row": None,
+                }
+
             show_status(filename)
             console.print(f"[green]Row {idx + 1} saved.[/green]\n")
 
@@ -361,8 +425,23 @@ def run(session: Session) -> None:
                             df[nc] = ""
                     columns = new_ordered_cols
                     added_rows.append(new_values)
+
+                    # Attach new row to existing record or create one
+                    if current_record is not None:
+                        current_record["new_row"] = new_values.copy()
+                    else:
+                        current_record = {
+                            "row_num": idx + 1,
+                            "original": original.copy(),
+                            "edited": None,
+                            "new_row": new_values.copy(),
+                        }
+
                     show_status(filename)
                     console.print("[green]New row added.[/green]\n")
+
+            if current_record is not None:
+                change_records.append(current_record)
 
         # Append new rows
         if added_rows:
@@ -408,8 +487,17 @@ def run(session: Session) -> None:
             f"Saved: {out.name}",
         )
 
+        # Write change report
+        report_msg = ""
+        if change_records:
+            report_path = _write_report(
+                session.output_dir, out.name, columns, change_records,
+            )
+            report_msg = f"  Report: [bold]{report_path.name}[/bold]\n"
+
         console.print(
             f"\n[green]Done![/green] Saved as [bold]{out.name}[/bold]\n"
+            f"{report_msg}"
         )
         console.input("[dim]Press Enter to continue...[/dim]")
         return

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import curses
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -354,6 +356,47 @@ def _edit_squash_curses(
     return curses.wrapper(_squash_editor, columns, values, group, header_info)
 
 
+REPORT_FILENAME = "squash_report.txt"
+
+
+def _init_report(output_dir: Path, columns: list[str]) -> Path:
+    """Create the squash report file with a header."""
+    report_path = output_dir / REPORT_FILENAME
+    sep = "=" * 60
+
+    with open(report_path, "w") as f:
+        f.write(f"{sep}\n")
+        f.write("Squash Report\n")
+        f.write(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"{sep}\n\n")
+
+        col_header = " | ".join(columns)
+        f.write(f"Columns: {col_header}\n\n")
+
+    return report_path
+
+
+def _append_report_record(
+    report_path: Path,
+    columns: list[str],
+    record: dict,
+) -> None:
+    """Append a single squash record to the report file."""
+    with open(report_path, "a") as f:
+        f.write(
+            f"--- Group {record['group_num']} ({record['id_desc']}) "
+            f"[{len(record['original_rows'])} rows -> 1] ---\n"
+        )
+
+        for i, orig in enumerate(record["original_rows"], 1):
+            vals = " | ".join(orig.get(c, "") for c in columns)
+            f.write(f"  Row {i}:    {vals}\n")
+
+        output_vals = " | ".join(record["output_row"].get(c, "") for c in columns)
+        f.write(f"  Output:   {output_vals}\n")
+        f.write("\n")
+
+
 def run(session: Session) -> None:
     while True:
         clear_screen()
@@ -434,6 +477,7 @@ def run(session: Session) -> None:
         removed_original_rows: list[pd.DataFrame] = []
         result_rows: list[dict[str, str]] = []
         skipped_groups: list[pd.DataFrame] = []
+        report_path = _init_report(session.output_dir, columns)
 
         # Collect non-duplicate rows (pass through unchanged)
         non_dup_indices = set()
@@ -494,6 +538,20 @@ def run(session: Session) -> None:
             squashed_count += 1
             squashed_original_rows.append(group)
 
+            # Append to the report immediately
+            orig_rows = []
+            for _, row in group.iterrows():
+                orig_rows.append({
+                    col: "" if pd.isna(row.get(col, "")) else str(row.get(col, ""))
+                    for col in columns
+                })
+            _append_report_record(report_path, columns, {
+                "group_num": group_num,
+                "id_desc": id_desc,
+                "original_rows": orig_rows,
+                "output_row": {c: edited_values.get(c, "") for c in columns},
+            })
+
             # Write squashed original rows to file incrementally
             if squash_file:
                 squash_path = session.output_dir / squash_file
@@ -508,6 +566,8 @@ def run(session: Session) -> None:
             console.input("[dim]Press Enter to continue...[/dim]")
 
         if squashed_count == 0 and removed_count == 0 and not skipped_groups:
+            if report_path.exists():
+                report_path.unlink()
             console.print("[yellow]No groups were squashed or removed.[/yellow]")
             console.input("[dim]Press Enter to continue...[/dim]")
             continue
@@ -549,9 +609,18 @@ def run(session: Session) -> None:
                 remove_path = session.output_dir / remove_file
                 if remove_path.exists():
                     remove_path.unlink()
+            if report_path.exists():
+                report_path.unlink()
             continue
 
         out = session.save_step(final_df, "squash")
+
+        # Rename report to match the step filename
+        final_report_path = session.output_dir / f"{Path(out.name).stem}_report.txt"
+        if report_path.exists():
+            report_path.rename(final_report_path)
+            report_path = final_report_path
+
         session.logger.log(
             "Squash",
             f"Identity columns: {id_columns} | "
@@ -563,9 +632,15 @@ def run(session: Session) -> None:
             + (f" | Removed rows file: {remove_file}" if remove_file else ""),
         )
 
+        report_msg = ""
+        if squashed_count > 0:
+            report_msg = f"  Report: [bold]{report_path.name}[/bold]"
+
         console.print(
             f"\n[green]Done![/green] Saved as [bold]{out.name}[/bold]\n"
         )
+        if report_msg:
+            console.print(report_msg)
         if squash_file:
             console.print(
                 f"[dim]Original squashed rows saved to: {squash_file}[/dim]"

@@ -20,7 +20,7 @@ class Condition:
     """A single predicate evaluated against a row."""
 
     input_col: str
-    operator: str  # "not_empty" | "equals" | "not_equals" | "contains" | "word_count"
+    operator: str  # "not_empty" | "equals" | "not_equals" | "contains" | "word_count" | "alpha_only"
     value: str | None  # None for not_empty
 
 
@@ -58,6 +58,7 @@ OPERATORS: list[tuple[str, str]] = [
     ("not_equals", "Column does not equal value"),
     ("contains", "Column contains value"),
     ("word_count", "Word count comparison"),
+    ("alpha_only", "Column contains only letters and spaces"),
 ]
 
 WORD_COUNT_COMPARISONS: list[tuple[str, str]] = [
@@ -88,6 +89,8 @@ def format_condition(cond: Condition) -> str:
             sym = {"gt": ">", "lt": "<", "eq": "="}.get(cmp_op, cmp_op)
             return f'"{cond.input_col}" word count {sym} {num}'
         return f'"{cond.input_col}" word count {cond.value}'
+    if cond.operator == "alpha_only":
+        return f'"{cond.input_col}" is alpha-only'
     return f'"{cond.input_col}" {cond.operator} "{cond.value}"'
 
 
@@ -150,6 +153,8 @@ def _evaluate_single_condition(row: pd.Series, cond: Condition) -> bool:
             return count < num
         if cmp_op == "eq":
             return count == num
+    if cond.operator == "alpha_only":
+        return val.replace(" ", "").isalpha() if val else False
     return False
 
 
@@ -264,7 +269,7 @@ def _build_single_condition(
         cond_value = _prompt_word_count_value()
         if cond_value is None:
             return None
-    elif op != "not_empty":
+    elif op not in ("not_empty", "alpha_only"):
         cond_value = Prompt.ask(
             f"[bold green]Enter value to compare with '{in_col}'[/bold green]"
         )
@@ -343,7 +348,7 @@ def build_conditions(
             cond_value = _prompt_word_count_value()
             if cond_value is None:
                 continue
-        elif op != "not_empty":
+        elif op not in ("not_empty", "alpha_only"):
             cond_value = Prompt.ask(
                 f"[bold green]Enter value to compare with '{in_col}'[/bold green]"
             )

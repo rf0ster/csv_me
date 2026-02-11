@@ -394,6 +394,12 @@ def _append_report_record(
 
         output_vals = " | ".join(record["output_row"].get(c, "") for c in columns)
         f.write(f"  Output:   {output_vals}\n")
+
+        for i, new_row in enumerate(record.get("new_rows") or [], 1):
+            new_vals = " | ".join(new_row.get(c, "") for c in columns)
+            label = f"  New Row {i}:" if len(record.get("new_rows") or []) > 1 else "  New Row: "
+            f.write(f"{label} {new_vals}\n")
+
         f.write("\n")
 
 
@@ -476,6 +482,7 @@ def run(session: Session) -> None:
         squashed_original_rows: list[pd.DataFrame] = []
         removed_original_rows: list[pd.DataFrame] = []
         result_rows: list[dict[str, str]] = []
+        added_rows: list[dict[str, str]] = []
         skipped_groups: list[pd.DataFrame] = []
         report_path = _init_report(session.output_dir, columns)
 
@@ -538,6 +545,43 @@ def run(session: Session) -> None:
             squashed_count += 1
             squashed_original_rows.append(group)
 
+            show_status(filename)
+            console.print(
+                f"[green]Group squashed![/green] "
+                f"({len(group)} rows \u2192 1)\n"
+            )
+
+            # Offer to create new rows based on the squashed values
+            group_new_rows: list[dict[str, str]] = []
+            new_row_count = 0
+            while Confirm.ask(
+                "[bold green]Add a new row based on the squashed values?[/bold green]"
+            ):
+                new_row_count += 1
+                new_header = (
+                    f"New row {new_row_count} \u2014 Group {group_num} of {len(dup_groups)}  "
+                    f"({id_desc})"
+                )
+                new_result = _edit_squash_curses(
+                    columns,
+                    {c: edited_values.get(c, "") for c in columns},
+                    group,
+                    new_header,
+                )
+                clear_screen()
+                if new_result is not None and new_result != "remove":
+                    new_values, extra_cols, new_ordered_cols = new_result
+                    for nc in extra_cols:
+                        if nc not in df.columns:
+                            df[nc] = ""
+                    columns = new_ordered_cols
+                    added_rows.append(new_values)
+                    group_new_rows.append(new_values)
+                    show_status(filename)
+                    console.print(f"[green]New row {new_row_count} added.[/green]\n")
+                else:
+                    show_status(filename)
+
             # Append to the report immediately
             orig_rows = []
             for _, row in group.iterrows():
@@ -550,6 +594,9 @@ def run(session: Session) -> None:
                 "id_desc": id_desc,
                 "original_rows": orig_rows,
                 "output_row": {c: edited_values.get(c, "") for c in columns},
+                "new_rows": [{c: nv.get(c, "") for c in columns} for nv in group_new_rows]
+                if group_new_rows
+                else None,
             })
 
             # Write squashed original rows to file incrementally
@@ -558,11 +605,6 @@ def run(session: Session) -> None:
                 write_header = not squash_path.exists()
                 group.to_csv(squash_path, mode="a", index=False, header=write_header)
 
-            show_status(filename)
-            console.print(
-                f"[green]Group squashed![/green] "
-                f"({len(group)} rows \u2192 1)\n"
-            )
             console.input("[dim]Press Enter to continue...[/dim]")
 
         if squashed_count == 0 and removed_count == 0 and not skipped_groups:
@@ -581,6 +623,9 @@ def run(session: Session) -> None:
         if result_rows:
             squashed_df = pd.DataFrame(result_rows, columns=columns)
             parts.append(squashed_df)
+        if added_rows:
+            added_df = pd.DataFrame(added_rows, columns=columns)
+            parts.append(added_df)
 
         final_df = pd.concat(parts, ignore_index=True)
         # Reorder columns to match the user's ordering (including new columns)
@@ -595,7 +640,8 @@ def run(session: Session) -> None:
         total_removed_rows = sum(len(grp) for grp in removed_original_rows)
         console.print(
             f"[dim]{squashed_count} group(s) squashed "
-            f"({total_squashed_rows} rows \u2192 {squashed_count}). "
+            f"({total_squashed_rows} rows \u2192 {squashed_count}), "
+            f"{len(added_rows)} row(s) added. "
             f"{removed_count} group(s) removed ({total_removed_rows} rows). "
             f"{len(skipped_groups)} group(s) skipped.[/dim]\n"
         )
@@ -625,6 +671,7 @@ def run(session: Session) -> None:
             "Squash",
             f"Identity columns: {id_columns} | "
             f"Groups squashed: {squashed_count} | "
+            f"Rows added: {len(added_rows)} | "
             f"Groups removed: {removed_count} ({total_removed_rows} rows) | "
             f"Rows before: {len(df)} | Rows after: {len(final_df)} | "
             f"Saved: {out.name}"
